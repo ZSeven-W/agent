@@ -1,0 +1,11 @@
+# Zig
+zig-out/
+.zig-cache/
+
+# NAPI
+napi/node_modules/
+napi/*.node
+
+# OS
+.DS_Store
+.claude/projects

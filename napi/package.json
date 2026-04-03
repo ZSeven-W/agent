@@ -1,0 +1,19 @@
+{
+  "name": "@zseven-w/agent-native",
+  "version": "0.1.0",
+  "description": "Zig agent SDK — Node-API native addon for Node.js / Bun",
+  "main": "index.js",
+  "types": "ts/index.d.ts",
+  "files": [
+    "ts/index.d.ts",
+    "index.js",
+    "agent_napi.node"
+  ],
+  "scripts": {
+    "build": "cd .. && zig build napi -Doptimize=ReleaseFast"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0"
+  }
+}
