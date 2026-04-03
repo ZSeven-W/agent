@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build library
+        run: zig build
+
+  build-napi:
+    name: Build NAPI (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            arch: arm64
+            runner: macos-14
+          - os: macos
+            arch: x64
+            runner: macos-13
+          - os: linux
+            arch: x64
+            runner: ubuntu-latest
+          - os: windows
+            arch: x64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build NAPI addon
+        run: zig build napi -Doptimize=ReleaseFast
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent_napi-${{ matrix.os }}-${{ matrix.arch }}.node
+          path: zig-out/napi/agent_napi.node
+          retention-days: 30
