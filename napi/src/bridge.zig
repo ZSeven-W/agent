@@ -2,24 +2,33 @@
 //! Node-API (NAPI) bridge — wraps agent C ABI as a Node.js native addon.
 //!
 //! Uses the Node-API stable ABI (NAPI_VERSION >= 6).
-//! All exported JS functions use flat string/number arguments for simplicity:
-//! no napi_get_named_property needed.
 //!
 //! JS signatures (see ../ts/index.d.ts):
 //!   agentVersion() → string
-//!   createAnthropicProvider(apiKey, model) → handle
+//!   createAnthropicProvider(apiKey, model, baseUrl?) → handle
 //!   createOpenAICompatProvider(apiKey, baseUrl, model) → handle
 //!   destroyProvider(handle) → void
 //!   createToolRegistry() → handle
 //!   registerToolSchema(registry, name, schemaJson) → void
 //!   destroyToolRegistry(handle) → void
-//!   createQueryEngine(provider, tools, systemPrompt, maxTurns, cwd) → handle
-//!   submitMessage(engine, prompt) → iterHandle
-//!   nextEvent(iter) → string | null
+//!   createQueryEngine({ provider, tools, systemPrompt, maxTurns, cwd }) → handle
+//!   submitMessage(engine, prompt) → Promise<iterHandle>
+//!   nextEvent(iter) → Promise<string | null>
+//!   seedMessages(engine, jsonArray) → void
+//!   abortEngine(engine) → void
 //!   resolveToolResult(engine, toolUseId, resultJson) → void
 //!   pushToolProgress(engine, toolUseId, progressJson) → void
 //!   destroyQueryEngine(handle) → void
 //!   destroyIterator(handle) → void
+//!   createSubAgent(provider, tools, systemPrompt, maxTurns) → handle
+//!   subAgentRun(agent, prompt) → Promise<iterHandle>
+//!   abortSubAgent(agent) → void
+//!   destroySubAgent(handle) → void
+//!   createTeam(leadProvider, leadTools, leadSystemPrompt, leadMaxTurns) → handle
+//!   runTeam(team, prompt) → Promise<iterHandle>
+//!   resolveTeamToolResult(team, toolUseId, resultJson) → void
+//!   abortTeam(team) → void
+//!   destroyTeam(handle) → void
 
 const std = @import("std");
 
@@ -51,15 +60,26 @@ extern fn napi_throw_error(env: napi_env, code: ?[*:0]const u8, msg: [*:0]const 
 extern fn napi_is_null(env: napi_env, value: napi_value, result: *bool) napi_status;
 extern fn napi_is_undefined(env: napi_env, value: napi_value, result: *bool) napi_status;
 
+const napi_async_work = *anyopaque;
+const napi_deferred = *anyopaque;
+
+extern fn napi_create_promise(env: napi_env, deferred: *napi_deferred, promise: *napi_value) napi_status;
+extern fn napi_resolve_deferred(env: napi_env, deferred: napi_deferred, resolution: napi_value) napi_status;
+extern fn napi_reject_deferred(env: napi_env, deferred: napi_deferred, rejection: napi_value) napi_status;
+extern fn napi_create_async_work(env: napi_env, async_resource: ?napi_value, async_resource_name: napi_value, execute: *const fn (?napi_env, ?*anyopaque) callconv(.c) void, complete: *const fn (napi_env, napi_status, ?*anyopaque) callconv(.c) void, data: ?*anyopaque, result: *napi_async_work) napi_status;
+extern fn napi_queue_async_work(env: napi_env, work: napi_async_work) napi_status;
+extern fn napi_delete_async_work(env: napi_env, work: napi_async_work) napi_status;
+extern fn napi_get_named_property(env: napi_env, object: napi_value, utf8name: [*:0]const u8, result: *napi_value) napi_status;
+
 // ─── C ABI imports from agent ─────────────────────────────────────────────────
 
 const Handle = ?*anyopaque;
 
 extern fn agent_version() [*:0]const u8;
-extern fn agent_create_anthropic_provider(api_key_ptr: [*]const u8, api_key_len: usize, model_ptr: [*]const u8, model_len: usize) Handle;
+extern fn agent_create_anthropic_provider(api_key_ptr: [*]const u8, api_key_len: usize, model_ptr: [*]const u8, model_len: usize, base_url_ptr: ?[*]const u8, base_url_len: usize) Handle;
 extern fn agent_create_openai_compat_provider(api_key_ptr: [*]const u8, api_key_len: usize, base_url_ptr: [*]const u8, base_url_len: usize, model_ptr: [*]const u8, model_len: usize) Handle;
 extern fn agent_destroy_provider(handle: Handle) void;
-extern fn agent_create_engine(provider: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32) Handle;
+extern fn agent_create_engine(provider: Handle, tools: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32) Handle;
 extern fn agent_destroy_engine(handle: Handle) void;
 extern fn agent_submit_message(engine: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
 extern fn agent_destroy_iterator(handle: Handle) void;
@@ -70,6 +90,17 @@ extern fn agent_push_tool_progress(engine: Handle, id_ptr: [*]const u8, id_len: 
 extern fn agent_create_tool_registry() Handle;
 extern fn agent_register_tool_schema(registry: Handle, name_ptr: [*]const u8, name_len: usize, schema_ptr: [*]const u8, schema_len: usize) void;
 extern fn agent_destroy_tool_registry(handle: Handle) void;
+extern fn agent_seed_messages(engine: Handle, json_ptr: [*]const u8, json_len: usize) void;
+extern fn agent_abort_engine(engine: Handle) void;
+extern fn agent_create_sub_agent(provider: Handle, tools: Handle, sp_ptr: ?[*]const u8, sp_len: usize, max_turns: u32) Handle;
+extern fn agent_sub_agent_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
+extern fn agent_abort_sub_agent(handle: Handle) void;
+extern fn agent_destroy_sub_agent(handle: Handle) void;
+extern fn agent_create_team(lead_provider: Handle, lead_tools: Handle, sp_ptr: ?[*]const u8, sp_len: usize, max_turns: u32) Handle;
+extern fn agent_team_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
+extern fn agent_resolve_team_tool_result(handle: Handle, id_ptr: [*]const u8, id_len: usize, res_ptr: [*]const u8, res_len: usize) void;
+extern fn agent_abort_team(handle: Handle) void;
+extern fn agent_destroy_team(handle: Handle) void;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -126,6 +157,12 @@ fn isNullOrUndefined(env: napi_env, val: napi_value) bool {
     return is_null or is_undef;
 }
 
+fn jsStrFromVal(env: napi_env, val: napi_value, buf: []u8) []u8 {
+    var len: usize = 0;
+    _ = napi_get_value_string_utf8(env, val, buf.ptr, buf.len, &len);
+    return buf[0..len];
+}
+
 // ─── JS function implementations ──────────────────────────────────────────────
 
 fn js_agentVersion(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
@@ -136,8 +173,8 @@ fn js_agentVersion(env: napi_env, info: napi_callback_info) callconv(.c) napi_va
 }
 
 fn js_createAnthropicProvider(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 2;
-    var argv: [2]napi_value = undefined;
+    var argc: usize = 3;
+    var argv: [3]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 2) return nullVal(env);
 
@@ -146,7 +183,18 @@ fn js_createAnthropicProvider(env: napi_env, info: napi_callback_info) callconv(
     const api_key = jsStr(env, &argv, 0, &api_key_buf);
     const model = jsStr(env, &argv, 1, &model_buf);
 
-    const handle = agent_create_anthropic_provider(api_key.ptr, api_key.len, model.ptr, model.len);
+    var base_url_buf: [1024]u8 = undefined;
+    var base_url_ptr: ?[*]const u8 = null;
+    var base_url_len: usize = 0;
+    if (argc >= 3 and !isNullOrUndefined(env, argv[2])) {
+        const base_url = jsStr(env, &argv, 2, &base_url_buf);
+        if (base_url.len > 0) {
+            base_url_ptr = base_url.ptr;
+            base_url_len = base_url.len;
+        }
+    }
+
+    const handle = agent_create_anthropic_provider(api_key.ptr, api_key.len, model.ptr, model.len, base_url_ptr, base_url_len);
     return wrapHandle(env, handle);
 }
 
@@ -204,28 +252,60 @@ fn js_destroyToolRegistry(env: napi_env, info: napi_callback_info) callconv(.c) 
     return undefinedVal(env);
 }
 
-/// createQueryEngine(provider, tools, systemPrompt, maxTurns, cwd)
+/// createQueryEngine({ provider, tools, systemPrompt, maxTurns, cwd })
 fn js_createQueryEngine(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 5;
-    var argv: [5]napi_value = undefined;
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
-    if (argc < 5) return nullVal(env);
+    if (argc < 1) return nullVal(env);
+    const config = argv[0];
 
-    const provider = unwrapHandle(env, argv[0]);
-    // argv[1] is tools registry handle — passed for future use; engine currently
-    // creates its own registry internally. Stored for API completeness.
-    _ = unwrapHandle(env, argv[1]);
+    var provider_val: napi_value = undefined;
+    _ = napi_get_named_property(env, config, "provider", &provider_val);
+    const provider = unwrapHandle(env, provider_val);
 
+    var tools_val: napi_value = undefined;
+    _ = napi_get_named_property(env, config, "tools", &tools_val);
+    const tools: Handle = if (isNullOrUndefined(env, tools_val)) null else unwrapHandle(env, tools_val);
+
+    var sp_val: napi_value = undefined;
+    _ = napi_get_named_property(env, config, "systemPrompt", &sp_val);
     var sp_buf: [8192]u8 = undefined;
-    const system_prompt = jsStr(env, &argv, 2, &sp_buf);
-    const max_turns: u32 = @intCast(@max(0, jsInt32(env, &argv, 3)));
-    // cwd is unused in this version but accepted for API compatibility
-    var cwd_buf: [4096]u8 = undefined;
-    _ = jsStr(env, &argv, 4, &cwd_buf);
+    const system_prompt = if (isNullOrUndefined(env, sp_val)) @as([]u8, &.{}) else jsStrFromVal(env, sp_val, &sp_buf);
+
+    var mt_val: napi_value = undefined;
+    _ = napi_get_named_property(env, config, "maxTurns", &mt_val);
+    var max_turns_raw: i32 = 0;
+    _ = napi_get_value_int32(env, mt_val, &max_turns_raw);
+    const max_turns: u32 = @intCast(@max(0, max_turns_raw));
 
     const sp_ptr: ?[*]const u8 = if (system_prompt.len > 0) system_prompt.ptr else null;
-    const handle = agent_create_engine(provider, sp_ptr, system_prompt.len, max_turns);
+    const handle = agent_create_engine(provider, tools, sp_ptr, system_prompt.len, max_turns);
     return wrapHandle(env, handle);
+}
+
+const SubmitMessageData = struct {
+    engine_handle: Handle,
+    prompt: []const u8,
+    deferred: napi_deferred,
+    env: napi_env,
+    work: napi_async_work = undefined,
+    result_handle: Handle = null,
+};
+
+fn submitMessageExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
+    const d: *SubmitMessageData = @ptrCast(@alignCast(data.?));
+    d.result_handle = agent_submit_message(d.engine_handle, d.prompt.ptr, d.prompt.len);
+}
+
+fn submitMessageComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
+    const d: *SubmitMessageData = @ptrCast(@alignCast(data.?));
+    defer {
+        _ = napi_delete_async_work(env, d.work);
+        std.heap.c_allocator.free(d.prompt);
+        std.heap.c_allocator.destroy(d);
+    }
+    _ = napi_resolve_deferred(env, d.deferred, wrapHandle(env, d.result_handle));
 }
 
 fn js_submitMessage(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
@@ -233,31 +313,96 @@ fn js_submitMessage(env: napi_env, info: napi_callback_info) callconv(.c) napi_v
     var argv: [2]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 2) return nullVal(env);
-
     const engine = unwrapHandle(env, argv[0]);
     var prompt_buf: [65536]u8 = undefined;
-    const prompt = jsStr(env, &argv, 1, &prompt_buf);
+    const prompt_slice = jsStr(env, &argv, 1, &prompt_buf);
+    const prompt_dupe = std.heap.c_allocator.dupe(u8, prompt_slice) catch return nullVal(env);
 
-    const iter = agent_submit_message(engine, prompt.ptr, prompt.len);
-    return wrapHandle(env, iter);
+    var deferred: napi_deferred = undefined;
+    var promise: napi_value = undefined;
+    _ = napi_create_promise(env, &deferred, &promise);
+
+    const data = std.heap.c_allocator.create(SubmitMessageData) catch {
+        std.heap.c_allocator.free(prompt_dupe);
+        return nullVal(env);
+    };
+    data.* = .{ .engine_handle = engine, .prompt = prompt_dupe, .deferred = deferred, .env = env };
+
+    const resource_name = jsString(env, "agent_submitMessage");
+    _ = napi_create_async_work(env, null, resource_name, submitMessageExecute, submitMessageComplete, data, &data.work);
+    _ = napi_queue_async_work(env, data.work);
+    return promise;
 }
 
-/// nextEvent(iterator) → string | null
+const NextEventData = struct {
+    iter_handle: Handle,
+    deferred: napi_deferred,
+    env: napi_env,
+    work: napi_async_work = undefined,
+    result_ptr: ?[*]u8 = null,
+    result_len: usize = 0,
+};
+
+fn nextEventExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
+    const d: *NextEventData = @ptrCast(@alignCast(data.?));
+    d.result_ptr = agent_event_to_json(d.iter_handle, &d.result_len);
+}
+
+fn nextEventComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
+    const d: *NextEventData = @ptrCast(@alignCast(data.?));
+    defer {
+        _ = napi_delete_async_work(env, d.work);
+        std.heap.c_allocator.destroy(d);
+    }
+    if (d.result_ptr == null or d.result_len == 0) {
+        _ = napi_resolve_deferred(env, d.deferred, nullVal(env));
+        return;
+    }
+    const json_bytes = d.result_ptr.?[0..d.result_len];
+    const result = jsString(env, json_bytes);
+    agent_free_string(d.result_ptr.?, d.result_len);
+    _ = napi_resolve_deferred(env, d.deferred, result);
+}
+
+/// nextEvent(iterator) → Promise<string | null>
 fn js_nextEvent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
     var argc: usize = 1;
     var argv: [1]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 1) return nullVal(env);
-
     const iter = unwrapHandle(env, argv[0]);
-    var out_len: usize = 0;
-    const ptr = agent_event_to_json(iter, &out_len);
-    if (ptr == null or out_len == 0) return nullVal(env);
 
-    const json_bytes = ptr.?[0..out_len];
-    const result = jsString(env, json_bytes);
-    agent_free_string(ptr.?, out_len);
-    return result;
+    var deferred: napi_deferred = undefined;
+    var promise: napi_value = undefined;
+    _ = napi_create_promise(env, &deferred, &promise);
+
+    const data = std.heap.c_allocator.create(NextEventData) catch return nullVal(env);
+    data.* = .{ .iter_handle = iter, .deferred = deferred, .env = env };
+
+    const resource_name = jsString(env, "agent_nextEvent");
+    _ = napi_create_async_work(env, null, resource_name, nextEventExecute, nextEventComplete, data, &data.work);
+    _ = napi_queue_async_work(env, data.work);
+    return promise;
+}
+
+fn js_seedMessages(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 2;
+    var argv: [2]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return undefinedVal(env);
+    const engine = unwrapHandle(env, argv[0]);
+    var json_buf: [131072]u8 = undefined; // 128KB for message history
+    const json = jsStr(env, &argv, 1, &json_buf);
+    agent_seed_messages(engine, json.ptr, json.len);
+    return undefinedVal(env);
+}
+
+fn js_abortEngine(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc >= 1) agent_abort_engine(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
 }
 
 fn js_resolveToolResult(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
@@ -308,6 +453,194 @@ fn js_destroyIterator(env: napi_env, info: napi_callback_info) callconv(.c) napi
     return undefinedVal(env);
 }
 
+// ─── SubAgent wrappers ───────────────────────────────────────────────────────
+
+fn js_createSubAgent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 4;
+    var argv: [4]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return nullVal(env);
+
+    const provider = unwrapHandle(env, argv[0]);
+    const tools: Handle = if (argc >= 2 and !isNullOrUndefined(env, argv[1])) unwrapHandle(env, argv[1]) else null;
+
+    var sp_buf: [8192]u8 = undefined;
+    const sp = if (argc >= 3 and !isNullOrUndefined(env, argv[2])) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
+    const max_turns: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 50;
+
+    const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;
+    return wrapHandle(env, agent_create_sub_agent(provider, tools, sp_ptr, sp.len, max_turns));
+}
+
+fn js_destroySubAgent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc >= 1) agent_destroy_sub_agent(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
+}
+
+fn js_abortSubAgent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc >= 1) agent_abort_sub_agent(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
+}
+
+const SubAgentRunData = struct {
+    handle: Handle,
+    prompt: []const u8,
+    deferred: napi_deferred,
+    env: napi_env,
+    work: napi_async_work = undefined,
+    result_handle: Handle = null,
+};
+
+fn subAgentRunExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
+    const d: *SubAgentRunData = @ptrCast(@alignCast(data.?));
+    d.result_handle = agent_sub_agent_run(d.handle, d.prompt.ptr, d.prompt.len);
+}
+
+fn subAgentRunComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
+    const d: *SubAgentRunData = @ptrCast(@alignCast(data.?));
+    defer {
+        _ = napi_delete_async_work(env, d.work);
+        std.heap.c_allocator.free(d.prompt);
+        std.heap.c_allocator.destroy(d);
+    }
+    _ = napi_resolve_deferred(env, d.deferred, wrapHandle(env, d.result_handle));
+}
+
+fn js_subAgentRun(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 2;
+    var argv: [2]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return nullVal(env);
+
+    const handle = unwrapHandle(env, argv[0]);
+    var prompt_buf: [65536]u8 = undefined;
+    const prompt_slice = jsStr(env, &argv, 1, &prompt_buf);
+    const prompt_dupe = std.heap.c_allocator.dupe(u8, prompt_slice) catch return nullVal(env);
+
+    var deferred: napi_deferred = undefined;
+    var promise: napi_value = undefined;
+    _ = napi_create_promise(env, &deferred, &promise);
+
+    const data = std.heap.c_allocator.create(SubAgentRunData) catch {
+        std.heap.c_allocator.free(prompt_dupe);
+        return nullVal(env);
+    };
+    data.* = .{ .handle = handle, .prompt = prompt_dupe, .deferred = deferred, .env = env };
+
+    const resource_name = jsString(env, "agent_subAgentRun");
+    _ = napi_create_async_work(env, null, resource_name, subAgentRunExecute, subAgentRunComplete, data, &data.work);
+    _ = napi_queue_async_work(env, data.work);
+    return promise;
+}
+
+// ─── Team wrappers ───────────────────────────────────────────────────────────
+
+fn js_createTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 4;
+    var argv: [4]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return nullVal(env);
+
+    const lead_provider = unwrapHandle(env, argv[0]);
+    const lead_tools: Handle = if (argc >= 2 and !isNullOrUndefined(env, argv[1])) unwrapHandle(env, argv[1]) else null;
+
+    var sp_buf: [8192]u8 = undefined;
+    const sp = if (argc >= 3 and !isNullOrUndefined(env, argv[2])) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
+    const max_turns: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 20;
+
+    const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;
+    return wrapHandle(env, agent_create_team(lead_provider, lead_tools, sp_ptr, sp.len, max_turns));
+}
+
+const TeamRunData = struct {
+    handle: Handle,
+    prompt: []const u8,
+    deferred: napi_deferred,
+    env: napi_env,
+    work: napi_async_work = undefined,
+    result_handle: Handle = null,
+};
+
+fn teamRunExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
+    const d: *TeamRunData = @ptrCast(@alignCast(data.?));
+    d.result_handle = agent_team_run(d.handle, d.prompt.ptr, d.prompt.len);
+}
+
+fn teamRunComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
+    const d: *TeamRunData = @ptrCast(@alignCast(data.?));
+    defer {
+        _ = napi_delete_async_work(env, d.work);
+        std.heap.c_allocator.free(d.prompt);
+        std.heap.c_allocator.destroy(d);
+    }
+    _ = napi_resolve_deferred(env, d.deferred, wrapHandle(env, d.result_handle));
+}
+
+fn js_runTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 2;
+    var argv: [2]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return nullVal(env);
+
+    const handle = unwrapHandle(env, argv[0]);
+    var prompt_buf: [65536]u8 = undefined;
+    const prompt_slice = jsStr(env, &argv, 1, &prompt_buf);
+    const prompt_dupe = std.heap.c_allocator.dupe(u8, prompt_slice) catch return nullVal(env);
+
+    var deferred: napi_deferred = undefined;
+    var promise: napi_value = undefined;
+    _ = napi_create_promise(env, &deferred, &promise);
+
+    const data = std.heap.c_allocator.create(TeamRunData) catch {
+        std.heap.c_allocator.free(prompt_dupe);
+        return nullVal(env);
+    };
+    data.* = .{ .handle = handle, .prompt = prompt_dupe, .deferred = deferred, .env = env };
+
+    const resource_name = jsString(env, "agent_runTeam");
+    _ = napi_create_async_work(env, null, resource_name, teamRunExecute, teamRunComplete, data, &data.work);
+    _ = napi_queue_async_work(env, data.work);
+    return promise;
+}
+
+fn js_resolveTeamToolResult(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 3;
+    var argv: [3]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 3) return undefinedVal(env);
+
+    const team = unwrapHandle(env, argv[0]);
+    var id_buf: [256]u8 = undefined;
+    var res_buf: [65536]u8 = undefined;
+    const id = jsStr(env, &argv, 1, &id_buf);
+    const result = jsStr(env, &argv, 2, &res_buf);
+
+    agent_resolve_team_tool_result(team, id.ptr, id.len, result.ptr, result.len);
+    return undefinedVal(env);
+}
+
+fn js_abortTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc >= 1) agent_abort_team(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
+}
+
+fn js_destroyTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc >= 1) agent_destroy_team(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
+}
+
 // ─── Module registration ──────────────────────────────────────────────────────
 
 fn registerFn(env: napi_env, exports: napi_value, name: [*:0]const u8, cb: napi_callback) void {
@@ -327,9 +660,20 @@ export fn napi_register_module_v1(env: napi_env, exports: napi_value) napi_value
     registerFn(env, exports, "createQueryEngine", js_createQueryEngine);
     registerFn(env, exports, "submitMessage", js_submitMessage);
     registerFn(env, exports, "nextEvent", js_nextEvent);
+    registerFn(env, exports, "seedMessages", js_seedMessages);
+    registerFn(env, exports, "abortEngine", js_abortEngine);
     registerFn(env, exports, "resolveToolResult", js_resolveToolResult);
     registerFn(env, exports, "pushToolProgress", js_pushToolProgress);
     registerFn(env, exports, "destroyQueryEngine", js_destroyQueryEngine);
     registerFn(env, exports, "destroyIterator", js_destroyIterator);
+    registerFn(env, exports, "createSubAgent", js_createSubAgent);
+    registerFn(env, exports, "subAgentRun", js_subAgentRun);
+    registerFn(env, exports, "abortSubAgent", js_abortSubAgent);
+    registerFn(env, exports, "destroySubAgent", js_destroySubAgent);
+    registerFn(env, exports, "createTeam", js_createTeam);
+    registerFn(env, exports, "runTeam", js_runTeam);
+    registerFn(env, exports, "resolveTeamToolResult", js_resolveTeamToolResult);
+    registerFn(env, exports, "abortTeam", js_abortTeam);
+    registerFn(env, exports, "destroyTeam", js_destroyTeam);
     return exports;
 }

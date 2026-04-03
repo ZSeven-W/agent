@@ -13,6 +13,7 @@ const context_mod = @import("context/strategy.zig");
 const json_mod = @import("json.zig");
 const tools_reg = @import("tools/registry.zig");
 const file_cache_mod = @import("file_cache.zig");
+const etq_mod = @import("external_tool_queue.zig");
 
 pub const Event = streaming_events.Event;
 pub const EventIterator = streaming_events.EventIterator;
@@ -52,6 +53,7 @@ pub const QueryParams = struct {
     system_prompt: ?[]const u8 = null,
     max_turns: u32 = 50,
     max_budget_usd: ?f64 = null,
+    external_queue: ?*etq_mod.ExternalToolQueue = null,
 };
 
 /// The main agentic loop. Returns a QueryLoopIterator that yields Events.
@@ -84,6 +86,7 @@ pub const QueryLoopIterator = struct {
         start,
         streaming,
         tool_dispatch,
+        waiting_for_external_tools,
         tool_collecting,
         yielding_result,
         done,
@@ -165,10 +168,19 @@ pub const QueryLoopIterator = struct {
                     }
                 }
 
+                // Build merged tool schemas from registry (executable + external).
+                // Use an arena so that both the slice and any inner JsonValue
+                // allocations (from toJsonValue) are freed together.
+                var schema_arena = std.heap.ArenaAllocator.init(self.params.allocator);
+                defer schema_arena.deinit();
+                const tool_schemas = self.params.tool_registry.allSchemas(schema_arena.allocator()) catch &.{};
+                const tools_param: ?[]const providers_types.ToolSchema =
+                    if (tool_schemas.len > 0) tool_schemas else null;
+
                 const stream_result = self.params.provider.vtable.stream_text(
                     self.params.provider.ptr,
                     api_messages.items,
-                    null,
+                    tools_param,
                     .{ .system_prompt = self.params.system_prompt },
                 );
 
@@ -259,6 +271,18 @@ pub const QueryLoopIterator = struct {
                     const tool_name = tracked.block.name;
                     const tool_input = tracked.block.input;
 
+                    // External tools: yield tool_use event for JS, don't execute locally
+                    if (self.params.tool_registry.isExternal(tool_name)) {
+                        self.event_buf[self.event_count] = .{ .tool_use = .{
+                            .id = tracked.block.id,
+                            .name = tool_name,
+                            .input = tool_input,
+                        } };
+                        self.event_count += 1;
+                        // Don't block here — mark as executing and let events drain first
+                        continue;
+                    }
+
                     // 1. Look up tool
                     const maybe_tool = self.params.tool_registry.get(tool_name);
                     if (maybe_tool == null) {
@@ -307,6 +331,58 @@ pub const QueryLoopIterator = struct {
                         exec.complete(tracked.block.id, result);
                     } else |_| {
                         exec.fail(tracked.block.id, "Tool execution failed");
+                    }
+                }
+
+                // Check if there are external tools pending (executing but not yet resolved)
+                var has_external_pending = false;
+                for (exec.tracked.items) |t| {
+                    if (t.status == .executing and self.params.tool_registry.isExternal(t.block.name)) {
+                        has_external_pending = true;
+                        break;
+                    }
+                }
+
+                if (has_external_pending) {
+                    self.phase = .waiting_for_external_tools;
+                    // Return to drain buffered tool_use events first
+                    return nextEvent(ctx);
+                }
+
+                self.phase = .tool_collecting;
+                return nextEvent(ctx);
+            },
+
+            .waiting_for_external_tools => {
+                if (self.params.external_queue == null) {
+                    self.phase = .tool_collecting;
+                    return nextEvent(ctx);
+                }
+                const queue = self.params.external_queue.?;
+                var exec = &self.tool_exec.?;
+
+                // Block on each pending external tool until JS resolves it
+                for (exec.tracked.items) |*tracked| {
+                    if (tracked.status != .executing) continue;
+                    if (!self.params.tool_registry.isExternal(tracked.block.name)) continue;
+
+                    // Block until JS resolves this tool
+                    const ext_result = queue.waitFor(
+                        tracked.block.id,
+                        &self.params.abort.aborted,
+                    );
+                    if (ext_result) |r| {
+                        const parsed = json_mod.parse(self.params.allocator, r.result_json) catch {
+                            exec.fail(tracked.block.id, "Failed to parse external tool result");
+                            self.params.allocator.free(r.tool_use_id);
+                            self.params.allocator.free(r.result_json);
+                            continue;
+                        };
+                        exec.complete(tracked.block.id, .{ .data = parsed.value });
+                        self.params.allocator.free(r.tool_use_id);
+                        self.params.allocator.free(r.result_json);
+                    } else {
+                        exec.fail(tracked.block.id, "aborted");
                     }
                 }
 

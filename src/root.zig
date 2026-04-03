@@ -19,7 +19,15 @@ pub const context = @import("context.zig");
 pub const query = @import("query.zig");
 pub const query_engine = @import("query_engine.zig");
 pub const QueryEngine = query_engine.QueryEngine;
+pub const sub_agent = @import("sub_agent.zig");
+pub const SubAgent = sub_agent.SubAgent;
+pub const team = @import("team.zig");
+pub const Team = team.Team;
+pub const delegate = @import("tools/delegate.zig");
 pub const compact = @import("compact.zig");
+pub const external_tool_queue = @import("external_tool_queue.zig");
+pub const task = @import("task.zig");
+pub const swarm = @import("swarm.zig");
 pub const testing = @import("testing.zig");
 pub const buildTool = tool.buildTool;
 
@@ -40,6 +48,12 @@ test {
     _ = context;
     _ = query;
     _ = query_engine;
+    _ = sub_agent;
+    _ = team;
+    _ = delegate;
     _ = compact;
+    _ = external_tool_queue;
+    _ = task;
+    _ = swarm;
     _ = testing;
 }

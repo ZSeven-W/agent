@@ -94,6 +94,20 @@ pub const HookEventData = struct {
     data: ?JsonValue = null,
 };
 
+/// An external tool invocation that JS must execute and resolve via resolveToolResult.
+pub const ToolUseEvent = struct {
+    id: []const u8,
+    name: []const u8,
+    input: JsonValue,
+};
+
+/// Event data for team member lifecycle.
+pub const MemberEvent = struct {
+    member_id: []const u8,
+    task: ?[]const u8 = null,
+    result: ?[]const u8 = null,
+};
+
 /// Rate-limit information returned by the server.
 pub const RateLimitInfo = struct {
     /// Whether the request was allowed, allowed with a warning, or rejected.
@@ -152,6 +166,12 @@ pub const Event = union(enum) {
     result: ResultData,
     /// Rate-limit information from the server.
     rate_limit: RateLimitInfo,
+    /// An external tool invocation that JS must execute and resolve via resolveToolResult.
+    tool_use: ToolUseEvent,
+    /// A team member has started working on a delegated task.
+    member_start: MemberEvent,
+    /// A team member has completed a delegated task.
+    member_end: MemberEvent,
 };
 
 // ---------------------------------------------------------------------------
