@@ -119,11 +119,28 @@ pub const HttpClient = struct {
 
         std.debug.print("[http] waiting for response...\n", .{});
         var redirect_buf: [4 * 1024]u8 = undefined;
-        const response = request.receiveHead(&redirect_buf) catch |err| {
+        var response = request.receiveHead(&redirect_buf) catch |err| {
             std.debug.print("[http] receiveHead failed: {s}\n", .{@errorName(err)});
             return error.ConnectionFailed;
         };
         std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
+
+        // For error responses, read and print diagnostics BEFORE the Response
+        // is moved into StreamingResponse — reader() panics on the moved copy
+        // when some servers omit proper Content-Length/Transfer-Encoding.
+        if (response.head.status != .ok) {
+            if (req.body) |b| {
+                const preview = if (b.len > 2000) b[0..2000] else b;
+                std.debug.print("[http] request body ({d} bytes): {s}\n", .{ b.len, preview });
+            }
+            var err_buf: [4096]u8 = undefined;
+            var err_transfer_buf: [8 * 1024]u8 = undefined;
+            const err_reader = response.reader(&err_transfer_buf);
+            const err_n = err_reader.readSliceShort(&err_buf) catch 0;
+            if (err_n > 0) {
+                std.debug.print("[http] response body: {s}\n", .{err_buf[0..err_n]});
+            }
+        }
 
         return .{
             .allocator = self.allocator,
