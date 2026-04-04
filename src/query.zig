@@ -81,6 +81,8 @@ pub const QueryLoopIterator = struct {
     // Current turn state
     stream_iter: ?providers_types.StreamIterator = null,
     tool_exec: ?tool_executor_mod.StreamingToolExecutor = null,
+    // Accumulates partial_json fragments for the current tool_use input
+    tool_json_buf: std.ArrayListUnmanaged(u8) = .{},
 
     const Phase = enum {
         start,
@@ -214,6 +216,8 @@ pub const QueryLoopIterator = struct {
                             if (self.tool_exec == null) {
                                 self.tool_exec = tool_executor_mod.StreamingToolExecutor.init(self.params.allocator);
                             }
+                            // Reset partial_json accumulator for new tool
+                            self.tool_json_buf.clearRetainingCapacity();
                             const msg_count = self.state.messages.count();
                             const uuid = if (msg_count > 0)
                                 self.state.messages.items()[msg_count - 1].getHeader().uuid
@@ -224,6 +228,26 @@ pub const QueryLoopIterator = struct {
                                 .name = delta.tool_name.?,
                                 .input = .null,
                             }, uuid) catch {};
+                        }
+
+                        // Accumulate tool input JSON fragments
+                        if (delta.@"type" == .tool_use_delta) {
+                            if (delta.partial_json) |pj| {
+                                self.tool_json_buf.appendSlice(self.params.allocator, pj) catch {};
+                            }
+                        }
+
+                        // When a tool_use content block ends, parse accumulated JSON into the tool's input
+                        if (delta.@"type" == .content_block_stop and self.tool_exec != null and self.tool_json_buf.items.len > 0) {
+                            const parsed_input = json_mod.parse(self.params.allocator, self.tool_json_buf.items) catch null;
+                            if (parsed_input) |p| {
+                                // Update the last added tool's input
+                                const tracked = self.tool_exec.?.tracked.items;
+                                if (tracked.len > 0) {
+                                    tracked[tracked.len - 1].block.input = p.value;
+                                }
+                            }
+                            self.tool_json_buf.clearRetainingCapacity();
                         }
 
                         if (delta.@"type" == .message_stop) {

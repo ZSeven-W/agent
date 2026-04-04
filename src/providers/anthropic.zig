@@ -214,12 +214,20 @@ const AnthropicStreamState = struct {
         if (std.mem.eql(u8, event_type, "message_start")) {
             return .{ .@"type" = .message_start };
         } else if (std.mem.eql(u8, event_type, "content_block_start")) {
-            return .{ .@"type" = .content_block_start };
+            // Parse content_block to detect tool_use blocks:
+            // {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_xxx","name":"generate_design","input":{}}}
+            const block_info = parseContentBlockStart(allocator, sse.data);
+            return .{
+                .@"type" = .content_block_start,
+                .tool_use_id = block_info.tool_use_id,
+                .tool_name = block_info.tool_name,
+            };
         } else if (std.mem.eql(u8, event_type, "content_block_delta")) {
             // sse.data is JSON: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
             // or thinking: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}
+            // or tool input: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"..."}}
             const delta_info = parseDeltaJson(allocator, sse.data);
-            return .{ .@"type" = delta_info.delta_type, .text = delta_info.text };
+            return .{ .@"type" = delta_info.delta_type, .text = delta_info.text, .partial_json = delta_info.partial_json };
         } else if (std.mem.eql(u8, event_type, "content_block_stop")) {
             return .{ .@"type" = .content_block_stop };
         } else if (std.mem.eql(u8, event_type, "message_delta")) {
@@ -233,7 +241,40 @@ const AnthropicStreamState = struct {
     const DeltaInfo = struct {
         delta_type: streaming_events.DeltaType,
         text: ?[]const u8,
+        partial_json: ?[]const u8 = null,
     };
+
+    const ContentBlockInfo = struct {
+        tool_use_id: ?[]const u8 = null,
+        tool_name: ?[]const u8 = null,
+    };
+
+    /// Parse content_block_start data to extract tool_use metadata.
+    /// Anthropic format: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_xxx","name":"generate_design","input":{}}}
+    fn parseContentBlockStart(allocator: std.mem.Allocator, data: []const u8) ContentBlockInfo {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return .{};
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .object) return .{};
+        const block = root.object.get("content_block") orelse return .{};
+        if (block != .object) return .{};
+
+        // Check if this is a tool_use block
+        const block_type = block.object.get("type") orelse return .{};
+        if (block_type != .string) return .{};
+        if (!std.mem.eql(u8, block_type.string, "tool_use")) return .{};
+
+        // Extract id and name
+        var info = ContentBlockInfo{};
+        if (block.object.get("id")) |id_val| {
+            if (id_val == .string) info.tool_use_id = allocator.dupe(u8, id_val.string) catch null;
+        }
+        if (block.object.get("name")) |name_val| {
+            if (name_val == .string) info.tool_name = allocator.dupe(u8, name_val.string) catch null;
+        }
+        return info;
+    }
 
     /// Parse JSON data from a content_block_delta event.
     /// Extracts delta.text for text_delta, delta.thinking for thinking_delta.
@@ -257,7 +298,15 @@ const AnthropicStreamState = struct {
             return .{ .delta_type = .thinking_delta, .text = allocator.dupe(u8, val.string) catch null };
         }
 
-        // text_delta or input_json_delta
+        // input_json_delta: tool call argument streaming
+        // {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"..."}}
+        if (std.mem.eql(u8, dtype.string, "input_json_delta")) {
+            const val = delta_obj.object.get("partial_json") orelse return .{ .delta_type = .tool_use_delta, .text = null, .partial_json = null };
+            if (val != .string) return .{ .delta_type = .tool_use_delta, .text = null, .partial_json = null };
+            return .{ .delta_type = .tool_use_delta, .text = null, .partial_json = allocator.dupe(u8, val.string) catch null };
+        }
+
+        // text_delta
         const val = delta_obj.object.get("text") orelse return .{ .delta_type = .text_delta, .text = null };
         if (val != .string) return .{ .delta_type = .text_delta, .text = null };
         return .{ .delta_type = .text_delta, .text = allocator.dupe(u8, val.string) catch null };
