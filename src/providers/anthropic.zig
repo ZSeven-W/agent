@@ -68,17 +68,10 @@ pub const AnthropicProvider = struct {
         }) catch return error.ConnectionFailed;
 
         if (response.status != .ok) {
-            // Read error body for diagnostics before closing
-            var err_buf: [4096]u8 = undefined;
-            var err_len: usize = 0;
-            if (response.readChunk(&err_buf)) |n| {
-                err_len = n;
-            } else |_| {}
-            if (err_len > 0) {
-                std.debug.print("[http] API error {d}: {s}\n", .{ @intFromEnum(response.status), err_buf[0..err_len] });
-            } else {
-                std.debug.print("[http] API error {d} (no body)\n", .{@intFromEnum(response.status)});
-            }
+            // Log status — skip reading error body because some providers
+            // (e.g. Volcengine/Doubao) send error responses without proper
+            // Content-Length / Transfer-Encoding, causing reader() to panic.
+            std.debug.print("[http] API error {d}\n", .{@intFromEnum(response.status)});
             response.close();
             return switch (@intFromEnum(response.status)) {
                 401 => error.AuthenticationFailed,
