@@ -404,12 +404,18 @@ export fn agent_create_team(
         break :blk r;
     };
 
+    // Heap-duplicate system_prompt — the caller's buffer is on the stack and will be freed.
+    const lead_system_prompt: ?[]const u8 = if (lead_system_prompt_ptr) |p|
+        (allocator.dupe(u8, p[0..lead_system_prompt_len]) catch return null)
+    else
+        null;
+
     const t = allocator.create(team_mod.Team) catch return null;
     t.* = team_mod.Team.init(.{
         .allocator = allocator,
         .lead_provider = provider_ptr,
         .lead_tools = tools,
-        .lead_system_prompt = if (lead_system_prompt_ptr) |p| p[0..lead_system_prompt_len] else null,
+        .lead_system_prompt = lead_system_prompt,
         .lead_max_turns = if (lead_max_turns > 0) lead_max_turns else 20,
         .members = &.{},
     }) catch return null;
@@ -427,15 +433,23 @@ export fn agent_team_add_member(
     max_turns: u32,
 ) bool {
     if (team_handle == null or provider_handle == null or tools_handle == null) return false;
+    const allocator = std.heap.c_allocator;
     const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
     const provider_ptr: *providers_types.Provider = @ptrCast(@alignCast(provider_handle.?));
     const tools: *tools_reg.ToolRegistry = @ptrCast(@alignCast(tools_handle.?));
 
+    // Heap-duplicate strings — caller's buffers are on the stack and will be freed.
+    const id = allocator.dupe(u8, member_id_ptr[0..member_id_len]) catch return false;
+    const system_prompt: ?[]const u8 = if (system_prompt_ptr) |p|
+        (allocator.dupe(u8, p[0..system_prompt_len]) catch return false)
+    else
+        null;
+
     t.addMember(.{
-        .id = member_id_ptr[0..member_id_len],
+        .id = id,
         .provider = provider_ptr,
         .tools = tools,
-        .system_prompt = if (system_prompt_ptr) |p| p[0..system_prompt_len] else null,
+        .system_prompt = system_prompt,
         .max_turns = if (max_turns > 0) max_turns else 20,
     }) catch return false;
 
