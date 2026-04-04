@@ -496,3 +496,31 @@ export fn agent_destroy_team(handle: ?*anyopaque) void {
     t.deinit();
     std.heap.c_allocator.destroy(t);
 }
+
+export fn agent_resolve_member_tool_result(
+    team_handle: ?*anyopaque,
+    member_id_ptr: [*]const u8,
+    member_id_len: usize,
+    tool_use_id_ptr: [*]const u8,
+    tool_use_id_len: usize,
+    result_json_ptr: [*]const u8,
+    result_json_len: usize,
+) void {
+    if (team_handle == null) return;
+    const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
+    const member = t.getMember(member_id_ptr[0..member_id_len]) orelse return;
+    member.resolveToolResult(
+        tool_use_id_ptr[0..tool_use_id_len],
+        result_json_ptr[0..result_json_len],
+    );
+}
+
+export fn agent_team_seed_messages(
+    team_handle: ?*anyopaque,
+    json_ptr: [*]const u8,
+    json_len: usize,
+) void {
+    if (team_handle == null) return;
+    const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
+    t.seedMessages(json_ptr[0..json_len]) catch {};
+}
