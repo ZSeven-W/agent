@@ -458,10 +458,13 @@ export fn agent_team_add_member(
 
 export fn agent_team_run(handle: ?*anyopaque, prompt_ptr: [*]const u8, prompt_len: usize) AgentEventIterHandle {
     if (handle == null) return null;
-    const t: *team_mod.Team = @ptrCast(@alignCast(handle.?));
     const allocator = std.heap.c_allocator;
+    const t: *team_mod.Team = @ptrCast(@alignCast(handle.?));
+    // Heap-duplicate prompt — the caller's buffer is freed after async work completes,
+    // but submitMessage stores the pointer in the message store for later API calls.
+    const prompt = allocator.dupe(u8, prompt_ptr[0..prompt_len]) catch return null;
     const iter_ptr = allocator.create(streaming_mod.EventIterator) catch return null;
-    iter_ptr.* = t.run(prompt_ptr[0..prompt_len]);
+    iter_ptr.* = t.run(prompt);
     return @ptrCast(iter_ptr);
 }
 
