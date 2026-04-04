@@ -50,6 +50,7 @@ export const {
   abortSubAgent,
   destroySubAgent,
   createTeam,
+  addTeamMember,
   runTeam,
   resolveTeamToolResult,
   abortTeam,

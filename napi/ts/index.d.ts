@@ -51,6 +51,14 @@ export declare function destroySubAgent(handle: SubAgentHandle): void;
 // ─── Team ───
 export type TeamHandle = object & { readonly __brand: "TeamHandle" };
 export declare function createTeam(leadProvider: ProviderHandle, leadTools: ToolRegistryHandle | null, leadSystemPrompt: string, leadMaxTurns: number): TeamHandle;
+export declare function addTeamMember(
+  team: TeamHandle,
+  memberId: string,
+  provider: ProviderHandle,
+  tools: ToolRegistryHandle,
+  systemPrompt: string,
+  maxTurns: number,
+): void;
 export declare function runTeam(team: TeamHandle, prompt: string): Promise<IteratorHandle>;
 export declare function resolveTeamToolResult(team: TeamHandle, toolUseId: string, resultJson: string): void;
 export declare function abortTeam(team: TeamHandle): void;

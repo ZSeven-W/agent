@@ -97,6 +97,7 @@ extern fn agent_sub_agent_run(handle: Handle, prompt_ptr: [*]const u8, prompt_le
 extern fn agent_abort_sub_agent(handle: Handle) void;
 extern fn agent_destroy_sub_agent(handle: Handle) void;
 extern fn agent_create_team(lead_provider: Handle, lead_tools: Handle, sp_ptr: ?[*]const u8, sp_len: usize, max_turns: u32) Handle;
+extern fn agent_team_add_member(team_handle: Handle, member_id_ptr: [*]const u8, member_id_len: usize, provider_handle: Handle, tools_handle: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32) bool;
 extern fn agent_team_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
 extern fn agent_resolve_team_tool_result(handle: Handle, id_ptr: [*]const u8, id_len: usize, res_ptr: [*]const u8, res_len: usize) void;
 extern fn agent_abort_team(handle: Handle) void;
@@ -512,6 +513,26 @@ fn js_createTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_valu
     return wrapHandle(env, agent_create_team(lead_provider, lead_tools, sp_ptr, sp.len, max_turns));
 }
 
+fn js_addTeamMember(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 6;
+    var argv: [6]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 4) return nullVal(env);
+
+    const team = unwrapHandle(env, argv[0]);
+    var id_buf: [256]u8 = undefined;
+    const member_id = jsStr(env, &argv, 1, &id_buf);
+    const member_provider = unwrapHandle(env, argv[2]);
+    const member_tools = unwrapHandle(env, argv[3]);
+    var sp_buf: [8192]u8 = undefined;
+    const sp = if (argc >= 5) jsStr(env, &argv, 4, &sp_buf) else @as([]u8, &.{});
+    const max_turns: u32 = if (argc >= 6) @intCast(@max(0, jsInt32(env, &argv, 5))) else 20;
+
+    const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;
+    const ok = agent_team_add_member(team, member_id.ptr, member_id.len, member_provider, member_tools, sp_ptr, sp.len, max_turns);
+    return if (ok) undefinedVal(env) else nullVal(env);
+}
+
 const TeamRunData = struct {
     handle: Handle,
     prompt: []const u8,
@@ -625,6 +646,7 @@ export fn napi_register_module_v1(env: napi_env, exports: napi_value) napi_value
     registerFn(env, exports, "abortSubAgent", js_abortSubAgent);
     registerFn(env, exports, "destroySubAgent", js_destroySubAgent);
     registerFn(env, exports, "createTeam", js_createTeam);
+    registerFn(env, exports, "addTeamMember", js_addTeamMember);
     registerFn(env, exports, "runTeam", js_runTeam);
     registerFn(env, exports, "resolveTeamToolResult", js_resolveTeamToolResult);
     registerFn(env, exports, "abortTeam", js_abortTeam);

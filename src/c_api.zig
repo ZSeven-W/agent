@@ -416,6 +416,32 @@ export fn agent_create_team(
     return @ptrCast(t);
 }
 
+export fn agent_team_add_member(
+    team_handle: ?*anyopaque,
+    member_id_ptr: [*]const u8,
+    member_id_len: usize,
+    provider_handle: AgentProviderHandle,
+    tools_handle: ?*anyopaque,
+    system_prompt_ptr: ?[*]const u8,
+    system_prompt_len: usize,
+    max_turns: u32,
+) bool {
+    if (team_handle == null or provider_handle == null or tools_handle == null) return false;
+    const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
+    const provider_ptr: *providers_types.Provider = @ptrCast(@alignCast(provider_handle.?));
+    const tools: *tools_reg.ToolRegistry = @ptrCast(@alignCast(tools_handle.?));
+
+    t.addMember(.{
+        .id = member_id_ptr[0..member_id_len],
+        .provider = provider_ptr,
+        .tools = tools,
+        .system_prompt = if (system_prompt_ptr) |p| p[0..system_prompt_len] else null,
+        .max_turns = if (max_turns > 0) max_turns else 20,
+    }) catch return false;
+
+    return true;
+}
+
 export fn agent_team_run(handle: ?*anyopaque, prompt_ptr: [*]const u8, prompt_len: usize) AgentEventIterHandle {
     if (handle == null) return null;
     const t: *team_mod.Team = @ptrCast(@alignCast(handle.?));

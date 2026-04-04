@@ -165,6 +165,36 @@ pub const Team = struct {
         return self.members.getPtr(member_id);
     }
 
+    /// Add a member to the team. Must be called before run().
+    pub fn addMember(self: *Team, config: TeamMemberConfig) !void {
+        const m_perm = try self.allocator.create(perm.PermissionContext);
+        m_perm.* = .{};
+        try self.perm_ctxs.append(self.allocator, m_perm);
+
+        const m_hooks = try self.allocator.create(hook_mod.HookRunner);
+        m_hooks.* = hook_mod.HookRunner.init(self.allocator);
+        try self.hook_runners.append(self.allocator, m_hooks);
+
+        const m_sw = try self.allocator.create(context_mod.SlidingWindowStrategy);
+        m_sw.* = context_mod.SlidingWindowStrategy.init(20);
+        try self.sliding_windows.append(self.allocator, m_sw);
+
+        const m_strat = try self.allocator.create(context_mod.ContextStrategy);
+        m_strat.* = m_sw.strategy();
+        try self.strategies.append(self.allocator, m_strat);
+
+        try self.members.put(config.id, query_engine_mod.QueryEngine.init(.{
+            .allocator = self.allocator,
+            .provider = config.provider,
+            .tools = config.tools,
+            .permission_ctx = m_perm,
+            .hook_runner = m_hooks,
+            .context_strategy = m_strat,
+            .system_prompt = config.system_prompt,
+            .max_turns = config.max_turns,
+        }));
+    }
+
     /// Return the number of registered members.
     pub fn memberCount(self: *const Team) usize {
         return self.members.count();
