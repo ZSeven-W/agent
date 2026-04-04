@@ -463,6 +463,33 @@ export fn agent_abort_team(handle: ?*anyopaque) void {
     t.abortTeam();
 }
 
+export fn agent_team_register_delegate(team_handle: ?*anyopaque) bool {
+    if (team_handle == null) return false;
+    const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
+    t.registerDelegateTool() catch return false;
+    return true;
+}
+
+export fn agent_team_run_member(
+    team_handle: ?*anyopaque,
+    member_id_ptr: [*]const u8,
+    member_id_len: usize,
+    task_ptr: [*]const u8,
+    task_len: usize,
+) AgentEventIterHandle {
+    if (team_handle == null) return null;
+    const allocator = std.heap.c_allocator;
+    const t: *team_mod.Team = @ptrCast(@alignCast(team_handle.?));
+    const member = t.getMember(member_id_ptr[0..member_id_len]) orelse return null;
+
+    // Heap-duplicate task string
+    const task = allocator.dupe(u8, task_ptr[0..task_len]) catch return null;
+
+    const iter_ptr = allocator.create(streaming_mod.EventIterator) catch return null;
+    iter_ptr.* = member.submitMessage(task);
+    return @ptrCast(iter_ptr);
+}
+
 export fn agent_destroy_team(handle: ?*anyopaque) void {
     if (handle == null) return;
     const t: *team_mod.Team = @ptrCast(@alignCast(handle.?));

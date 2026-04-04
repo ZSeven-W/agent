@@ -28,6 +28,8 @@
 //!   runTeam(team, prompt) → Promise<iterHandle>
 //!   resolveTeamToolResult(team, toolUseId, resultJson) → void
 //!   abortTeam(team) → void
+//!   teamRegisterDelegate(team) → void
+//!   runTeamMember(team, memberId, task) → Promise<iterHandle>
 //!   destroyTeam(handle) → void
 
 const std = @import("std");
@@ -102,6 +104,8 @@ extern fn agent_team_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: us
 extern fn agent_resolve_team_tool_result(handle: Handle, id_ptr: [*]const u8, id_len: usize, res_ptr: [*]const u8, res_len: usize) void;
 extern fn agent_abort_team(handle: Handle) void;
 extern fn agent_destroy_team(handle: Handle) void;
+extern fn agent_team_register_delegate(handle: Handle) bool;
+extern fn agent_team_run_member(handle: Handle, member_id_ptr: [*]const u8, member_id_len: usize, task_ptr: [*]const u8, task_len: usize) Handle;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -616,6 +620,81 @@ fn js_destroyTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_val
     return undefinedVal(env);
 }
 
+fn js_teamRegisterDelegate(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 1) return nullVal(env);
+    const team = unwrapHandle(env, argv[0]);
+    const ok = agent_team_register_delegate(team);
+    return if (ok) undefinedVal(env) else nullVal(env);
+}
+
+const TeamMemberRunData = struct {
+    handle: Handle,
+    member_id: []const u8,
+    task: []const u8,
+    deferred: napi_deferred,
+    env: napi_env,
+    work: napi_async_work = undefined,
+    result_handle: Handle = null,
+};
+
+fn teamMemberRunExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
+    const d: *TeamMemberRunData = @ptrCast(@alignCast(data.?));
+    d.result_handle = agent_team_run_member(d.handle, d.member_id.ptr, d.member_id.len, d.task.ptr, d.task.len);
+}
+
+fn teamMemberRunComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
+    const d: *TeamMemberRunData = @ptrCast(@alignCast(data.?));
+    defer {
+        _ = napi_delete_async_work(env, d.work);
+        std.heap.c_allocator.free(d.member_id);
+        std.heap.c_allocator.free(d.task);
+        std.heap.c_allocator.destroy(d);
+    }
+    _ = napi_resolve_deferred(env, d.deferred, wrapHandle(env, d.result_handle));
+}
+
+fn js_runTeamMember(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 3;
+    var argv: [3]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 3) return nullVal(env);
+
+    const handle = unwrapHandle(env, argv[0]);
+
+    // Get member_id string
+    var id_buf: [256]u8 = undefined;
+    const member_id_slice = jsStr(env, &argv, 1, &id_buf);
+    const member_id = std.heap.c_allocator.dupe(u8, member_id_slice) catch return nullVal(env);
+
+    // Get task string
+    var task_len: usize = 0;
+    _ = napi_get_value_string_utf8(env, argv[2], null, 0, &task_len);
+    const task = std.heap.c_allocator.alloc(u8, task_len) catch {
+        std.heap.c_allocator.free(member_id);
+        return nullVal(env);
+    };
+    _ = napi_get_value_string_utf8(env, argv[2], task.ptr, task.len + 1, &task_len);
+
+    var deferred: napi_deferred = undefined;
+    var promise: napi_value = undefined;
+    _ = napi_create_promise(env, &deferred, &promise);
+
+    const data = std.heap.c_allocator.create(TeamMemberRunData) catch {
+        std.heap.c_allocator.free(member_id);
+        std.heap.c_allocator.free(task);
+        return nullVal(env);
+    };
+    data.* = .{ .handle = handle, .member_id = member_id, .task = task, .deferred = deferred, .env = env };
+
+    const resource_name = jsString(env, "agent_runTeamMember");
+    _ = napi_create_async_work(env, null, resource_name, teamMemberRunExecute, teamMemberRunComplete, data, &data.work);
+    _ = napi_queue_async_work(env, data.work);
+    return promise;
+}
+
 // ─── Module registration ──────────────────────────────────────────────────────
 
 fn registerFn(env: napi_env, exports: napi_value, name: [*:0]const u8, cb: napi_callback) void {
@@ -651,5 +730,7 @@ export fn napi_register_module_v1(env: napi_env, exports: napi_value) napi_value
     registerFn(env, exports, "resolveTeamToolResult", js_resolveTeamToolResult);
     registerFn(env, exports, "abortTeam", js_abortTeam);
     registerFn(env, exports, "destroyTeam", js_destroyTeam);
+    registerFn(env, exports, "teamRegisterDelegate", js_teamRegisterDelegate);
+    registerFn(env, exports, "runTeamMember", js_runTeamMember);
     return exports;
 }

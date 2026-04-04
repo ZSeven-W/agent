@@ -63,3 +63,5 @@ export declare function runTeam(team: TeamHandle, prompt: string): Promise<Itera
 export declare function resolveTeamToolResult(team: TeamHandle, toolUseId: string, resultJson: string): void;
 export declare function abortTeam(team: TeamHandle): void;
 export declare function destroyTeam(handle: TeamHandle): void;
+export declare function teamRegisterDelegate(team: TeamHandle): void;
+export declare function runTeamMember(team: TeamHandle, memberId: string, task: string): Promise<IteratorHandle>;

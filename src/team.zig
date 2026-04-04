@@ -16,6 +16,7 @@ const providers_types = @import("providers/types.zig");
 const perm = @import("permission.zig");
 const hook_mod = @import("hook.zig");
 const context_mod = @import("context.zig");
+const json_mod = @import("json.zig");
 
 pub const TeamMemberConfig = struct {
     id: []const u8,
@@ -193,6 +194,23 @@ pub const Team = struct {
             .system_prompt = config.system_prompt,
             .max_turns = config.max_turns,
         }));
+    }
+
+    /// Register the "delegate" tool schema in the leader's tool registry.
+    /// Call after all members have been added, before run().
+    /// This lets the leader LLM call delegate({member_id, task}) to dispatch work.
+    pub fn registerDelegateTool(self: *Team) !void {
+        const schema_json =
+            \\{"type":"object","properties":{"member_id":{"type":"string","description":"ID of the team member to delegate to"},"task":{"type":"string","description":"Task description for the member"}},"required":["member_id","task"]}
+        ;
+        // Parse schema JSON
+        const parsed = try json_mod.parse(self.allocator, schema_json);
+        // Register as schema-only (external) tool — JS will handle execution
+        try self.lead.config.tools.registerSchema(.{
+            .name = "delegate",
+            .description = "Delegate a task to a team member",
+            .input_schema = parsed.value,
+        });
     }
 
     /// Return the number of registered members.
