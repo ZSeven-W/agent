@@ -57,6 +57,8 @@ export const {
   destroyTeam,
   teamRegisterDelegate,
   runTeamMember,
+  resolveMemberToolResult,
+  seedTeamMessages,
 } = addon;
 
 // createQueryEngine: destructure config object → flat args for Bun NAPI compat.

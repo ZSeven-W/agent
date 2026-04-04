@@ -30,6 +30,8 @@
 //!   abortTeam(team) → void
 //!   teamRegisterDelegate(team) → void
 //!   runTeamMember(team, memberId, task) → Promise<iterHandle>
+//!   resolveMemberToolResult(team, memberId, toolUseId, resultJson) → void
+//!   seedTeamMessages(team, messagesJson) → void
 //!   destroyTeam(handle) → void
 
 const std = @import("std");
@@ -106,6 +108,8 @@ extern fn agent_abort_team(handle: Handle) void;
 extern fn agent_destroy_team(handle: Handle) void;
 extern fn agent_team_register_delegate(handle: Handle) bool;
 extern fn agent_team_run_member(handle: Handle, member_id_ptr: [*]const u8, member_id_len: usize, task_ptr: [*]const u8, task_len: usize) Handle;
+extern fn agent_resolve_member_tool_result(handle: Handle, member_id_ptr: [*]const u8, member_id_len: usize, id_ptr: [*]const u8, id_len: usize, res_ptr: [*]const u8, res_len: usize) void;
+extern fn agent_team_seed_messages(handle: Handle, json_ptr: [*]const u8, json_len: usize) void;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -695,6 +699,44 @@ fn js_runTeamMember(env: napi_env, info: napi_callback_info) callconv(.c) napi_v
     return promise;
 }
 
+fn js_resolveMemberToolResult(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 4;
+    var argv: [4]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 4) return undefinedVal(env);
+
+    const team = unwrapHandle(env, argv[0]);
+    var member_buf: [256]u8 = undefined;
+    var id_buf: [256]u8 = undefined;
+    var res_buf: [65536]u8 = undefined;
+    const member_id = jsStr(env, &argv, 1, &member_buf);
+    const tool_id = jsStr(env, &argv, 2, &id_buf);
+    const result = jsStr(env, &argv, 3, &res_buf);
+
+    agent_resolve_member_tool_result(team, member_id.ptr, member_id.len, tool_id.ptr, tool_id.len, result.ptr, result.len);
+    return undefinedVal(env);
+}
+
+fn js_seedTeamMessages(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 2;
+    var argv: [2]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return undefinedVal(env);
+
+    const team = unwrapHandle(env, argv[0]);
+    // Use heap alloc for messages JSON — may exceed stack buffer.
+    // napi_get_value_string_utf8 writes len+1 bytes (includes NUL terminator),
+    // so allocate json_len + 1 to avoid writing past the buffer.
+    var json_len: usize = 0;
+    _ = napi_get_value_string_utf8(env, argv[1], null, 0, &json_len);
+    const json_buf = std.heap.c_allocator.alloc(u8, json_len + 1) catch return undefinedVal(env);
+    defer std.heap.c_allocator.free(json_buf);
+    _ = napi_get_value_string_utf8(env, argv[1], json_buf.ptr, json_buf.len, &json_len);
+
+    agent_team_seed_messages(team, json_buf.ptr, json_len);
+    return undefinedVal(env);
+}
+
 // ─── Module registration ──────────────────────────────────────────────────────
 
 fn registerFn(env: napi_env, exports: napi_value, name: [*:0]const u8, cb: napi_callback) void {
@@ -732,5 +774,7 @@ export fn napi_register_module_v1(env: napi_env, exports: napi_value) napi_value
     registerFn(env, exports, "destroyTeam", js_destroyTeam);
     registerFn(env, exports, "teamRegisterDelegate", js_teamRegisterDelegate);
     registerFn(env, exports, "runTeamMember", js_runTeamMember);
+    registerFn(env, exports, "resolveMemberToolResult", js_resolveMemberToolResult);
+    registerFn(env, exports, "seedTeamMessages", js_seedTeamMessages);
     return exports;
 }
