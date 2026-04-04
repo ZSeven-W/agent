@@ -195,6 +195,8 @@ pub const QueryLoopIterator = struct {
                         .subtype = switch (err) {
                             error.AuthenticationFailed => "error_authentication",
                             error.RateLimited => "error_rate_limit",
+                            error.ServerError => "error_server",
+                            error.InvalidRequest => "error_invalid_request",
                             else => "error_connection",
                         },
                         .num_turns = self.state.turn_count,

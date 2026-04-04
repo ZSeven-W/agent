@@ -29,6 +29,17 @@ pub const AnthropicProvider = struct {
         .stream_text = streamText,
     };
 
+    /// Return the stream_text function pointer at runtime (workaround for
+    /// static-lib-to-dylib relocation issue where const vtable fn ptrs are 0).
+    pub fn streamTextFn() *const fn (
+        *anyopaque,
+        []const types.ApiMessage,
+        ?[]const types.ToolSchema,
+        types.StreamConfig,
+    ) types.StreamError!types.StreamIterator {
+        return streamText;
+    }
+
     fn streamText(
         ptr: *anyopaque,
         messages: []const types.ApiMessage,
@@ -36,17 +47,12 @@ pub const AnthropicProvider = struct {
         config: types.StreamConfig,
     ) types.StreamError!types.StreamIterator {
         const self: *AnthropicProvider = @ptrCast(@alignCast(ptr));
-
         // Build request body JSON
         const body = buildRequestBody(self.allocator, self.config.model, messages, tools, config) catch
             return error.InvalidRequest;
 
-        // Build HTTP request.
-        // If base_url is provided it already includes the API version path (e.g.
-        // "https://host/anthropic/v1"), so just append "/messages".
-        // If not provided, use the default Anthropic endpoint.
         const url = if (self.config.base_url) |bu|
-            std.fmt.allocPrint(self.allocator, "{s}/messages", .{bu}) catch return error.InvalidRequest
+            std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{bu}) catch return error.InvalidRequest
         else
             std.fmt.allocPrint(self.allocator, "https://api.anthropic.com/v1/messages", .{}) catch return error.InvalidRequest;
 
@@ -62,6 +68,17 @@ pub const AnthropicProvider = struct {
         }) catch return error.ConnectionFailed;
 
         if (response.status != .ok) {
+            // Read error body for diagnostics before closing
+            var err_buf: [4096]u8 = undefined;
+            var err_len: usize = 0;
+            if (response.readChunk(&err_buf)) |n| {
+                err_len = n;
+            } else |_| {}
+            if (err_len > 0) {
+                std.debug.print("[http] API error {d}: {s}\n", .{ @intFromEnum(response.status), err_buf[0..err_len] });
+            } else {
+                std.debug.print("[http] API error {d} (no body)\n", .{@intFromEnum(response.status)});
+            }
             response.close();
             return switch (@intFromEnum(response.status)) {
                 401 => error.AuthenticationFailed,
@@ -70,7 +87,6 @@ pub const AnthropicProvider = struct {
             };
         }
 
-        // Create SSE stream state (owns url + body for lifetime of stream)
         const state = self.allocator.create(AnthropicStreamState) catch return error.ConnectionFailed;
         state.* = .{
             .http = http,

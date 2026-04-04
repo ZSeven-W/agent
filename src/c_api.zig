@@ -38,16 +38,35 @@ export fn agent_create_anthropic_provider(
     base_url_len: usize,
 ) AgentProviderHandle {
     const allocator = std.heap.c_allocator;
+    // Heap-duplicate all strings — caller's buffers are on the stack.
+    const api_key = allocator.dupe(u8, api_key_ptr[0..api_key_len]) catch return null;
+    const model = allocator.dupe(u8, model_ptr[0..model_len]) catch return null;
+    const base_url: ?[]const u8 = if (base_url_ptr) |p|
+        (allocator.dupe(u8, p[0..base_url_len]) catch return null)
+    else
+        null;
     const impl = allocator.create(providers_mod.AnthropicProvider) catch return null;
     impl.* = providers_mod.AnthropicProvider.init(allocator, .{
         .id = "anthropic",
-        .api_key = api_key_ptr[0..api_key_len],
-        .model = model_ptr[0..model_len],
-        .base_url = if (base_url_ptr) |p| p[0..base_url_len] else null,
+        .api_key = api_key,
+        .model = model,
+        .base_url = base_url,
     });
-    // Return *Provider VTable interface, not concrete type
+    // Heap-allocate vtable — Zig 0.15 may place `&vtable` (comptime const) on the
+    // stack as a temporary, making it a dangling pointer after provider() returns.
+    const vtable_ptr = allocator.create(providers_types.Provider.VTable) catch return null;
+    vtable_ptr.* = .{
+        .id = "anthropic",
+        .max_context_tokens = 200_000,
+        .supports_thinking = true,
+        .supports_tool_use = true,
+        .stream_text = providers_mod.AnthropicProvider.streamTextFn(),
+    };
     const iface = allocator.create(providers_types.Provider) catch return null;
-    iface.* = impl.provider();
+    iface.* = .{
+        .ptr = @ptrCast(impl),
+        .vtable = vtable_ptr,
+    };
     return @ptrCast(iface);
 }
 
@@ -63,7 +82,6 @@ export fn agent_create_engine(
     if (provider_handle == null) return null;
     const allocator = std.heap.c_allocator;
 
-    // provider_handle is already a *Provider (VTable interface)
     const provider_ptr: *providers_types.Provider = @ptrCast(@alignCast(provider_handle.?));
 
     const perm_ctx = allocator.create(perm.PermissionContext) catch return null;
@@ -85,7 +103,11 @@ export fn agent_create_engine(
     const strategy_ptr = allocator.create(context_mod.ContextStrategy) catch return null;
     strategy_ptr.* = sw.strategy();
 
-    const system_prompt: ?[]const u8 = if (system_prompt_ptr) |p| p[0..system_prompt_len] else null;
+    // Heap-duplicate system_prompt — the caller's buffer is on the stack and will be freed.
+    const system_prompt: ?[]const u8 = if (system_prompt_ptr) |p|
+        (allocator.dupe(u8, p[0..system_prompt_len]) catch return null)
+    else
+        null;
 
     const engine = allocator.create(QueryEngine) catch return null;
     engine.* = QueryEngine.init(.{
@@ -98,7 +120,6 @@ export fn agent_create_engine(
         .system_prompt = system_prompt,
         .max_turns = if (max_turns > 0) max_turns else 50,
     });
-
     return @ptrCast(engine);
 }
 
@@ -120,18 +141,32 @@ export fn agent_create_openai_compat_provider(
     model_len: usize,
 ) AgentProviderHandle {
     const allocator = std.heap.c_allocator;
+    const api_key = allocator.dupe(u8, api_key_ptr[0..api_key_len]) catch return null;
+    const base_url = allocator.dupe(u8, base_url_ptr[0..base_url_len]) catch return null;
+    const model = allocator.dupe(u8, model_ptr[0..model_len]) catch return null;
     const impl = allocator.create(providers_mod.OpenAICompatProvider) catch return null;
     impl.* = providers_mod.OpenAICompatProvider.init(allocator, .{
         .base = .{
             .id = "openai_compat",
-            .api_key = api_key_ptr[0..api_key_len],
-            .base_url = base_url_ptr[0..base_url_len],
-            .model = model_ptr[0..model_len],
+            .api_key = api_key,
+            .base_url = base_url,
+            .model = model,
         },
     });
-    // Return *Provider VTable interface, not concrete type
+    // Heap-allocate vtable (same Zig 0.15 workaround as anthropic provider)
+    const vtable_ptr = allocator.create(providers_types.Provider.VTable) catch return null;
+    vtable_ptr.* = .{
+        .id = "openai_compat",
+        .max_context_tokens = 128_000,
+        .supports_thinking = false,
+        .supports_tool_use = true,
+        .stream_text = providers_mod.OpenAICompatProvider.streamTextFn(),
+    };
     const iface = allocator.create(providers_types.Provider) catch return null;
-    iface.* = impl.provider();
+    iface.* = .{
+        .ptr = @ptrCast(impl),
+        .vtable = vtable_ptr,
+    };
     return @ptrCast(iface);
 }
 
@@ -209,8 +244,10 @@ export fn agent_submit_message(
     if (engine_handle == null) return null;
     const engine: *QueryEngine = @ptrCast(@alignCast(engine_handle.?));
     const allocator = std.heap.c_allocator;
+    // Heap-duplicate prompt — the caller's buffer is on the stack and will be freed.
+    const prompt = allocator.dupe(u8, prompt_ptr[0..prompt_len]) catch return null;
     const iter_ptr = allocator.create(streaming_mod.EventIterator) catch return null;
-    iter_ptr.* = engine.submitMessage(prompt_ptr[0..prompt_len]);
+    iter_ptr.* = engine.submitMessage(prompt);
     return @ptrCast(iter_ptr);
 }
 

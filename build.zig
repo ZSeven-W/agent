@@ -32,12 +32,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
     // ─── Target 3: NAPI addon (zig build napi → zig-out/napi/agent_napi.node) ───
+    // Statically links agent code so agent_napi.node is self-contained (no libagent.dylib needed).
+    const c_api_static_module = b.addModule("c_api_static", .{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_api_static_module.link_libc = true;
+    const static_lib = b.addLibrary(.{
+        .name = "agent_static",
+        .root_module = c_api_static_module,
+        .linkage = .static,
+    });
     const bridge_module = b.addModule("bridge", .{
         .root_source_file = b.path("napi/src/bridge.zig"),
         .target = target,
         .optimize = optimize,
     });
-    bridge_module.linkLibrary(shared_lib);
+    bridge_module.linkLibrary(static_lib);
     bridge_module.link_libc = true;
     const napi_lib = b.addLibrary(.{
         .name = "agent_napi",

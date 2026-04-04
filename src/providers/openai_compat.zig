@@ -40,6 +40,16 @@ pub const OpenAICompatProvider = struct {
         };
     }
 
+    /// Return function pointer at runtime (workaround for Zig 0.15 stack vtable issue).
+    pub fn streamTextFn() *const fn (
+        *anyopaque,
+        []const types.ApiMessage,
+        ?[]const types.ToolSchema,
+        types.StreamConfig,
+    ) types.StreamError!types.StreamIterator {
+        return streamText;
+    }
+
     fn streamText(
         ptr: *anyopaque,
         messages: []const types.ApiMessage,

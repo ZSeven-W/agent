@@ -1,19 +1,23 @@
 // Runtime loader for @zseven-w/agent-native NAPI addon.
-// Tries zig-out/napi/ first (development), then the package-bundled .node.
-const path = require("path");
-const fs = require("fs");
+// Uses ESM + createRequire so Vite's module runner can process this file.
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const _require = createRequire(import.meta.url);
 
 const candidates = [
-  // Built by `zig build napi` from repo root
-  path.join(__dirname, "..", "zig-out", "napi", "agent_napi.node"),
-  // Bundled in npm package
-  path.join(__dirname, "agent_napi.node"),
+  join(__dirname, "..", "zig-out", "napi", "agent_napi.node"),
+  join(__dirname, "agent_napi.node"),
 ];
 
 let addon;
 for (const p of candidates) {
-  if (fs.existsSync(p)) {
-    addon = require(p);
+  if (existsSync(p)) {
+    addon = _require(p);
     break;
   }
 }
@@ -26,4 +30,50 @@ if (!addon) {
   );
 }
 
-module.exports = addon;
+// Re-export bridge functions directly.
+export const {
+  agentVersion,
+  createAnthropicProvider,
+  createOpenAICompatProvider,
+  destroyProvider,
+  createToolRegistry,
+  registerToolSchema,
+  destroyToolRegistry,
+  seedMessages,
+  resolveToolResult,
+  pushToolProgress,
+  abortEngine,
+  destroyQueryEngine,
+  destroyIterator,
+  createSubAgent,
+  subAgentRun,
+  abortSubAgent,
+  destroySubAgent,
+  createTeam,
+  runTeam,
+  resolveTeamToolResult,
+  abortTeam,
+  destroyTeam,
+} = addon;
+
+// createQueryEngine: destructure config object → flat args for Bun NAPI compat.
+const _createQueryEngine = addon.createQueryEngine;
+export function createQueryEngine(config) {
+  return _createQueryEngine(
+    config.provider,
+    config.tools ?? null,
+    config.systemPrompt ?? "",
+    config.maxTurns ?? 50,
+    config.cwd ?? ".",
+  );
+}
+
+// submitMessage: synchronous (just creates iterator, no HTTP).
+export async function submitMessage(engine, prompt) {
+  return addon.submitMessage(engine, prompt);
+}
+
+// nextEvent: returns native NAPI Promise (async work on background thread).
+export const nextEvent = addon.nextEvent;
+
+export default addon;

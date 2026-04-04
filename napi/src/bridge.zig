@@ -183,10 +183,12 @@ fn js_createAnthropicProvider(env: napi_env, info: napi_callback_info) callconv(
     const api_key = jsStr(env, &argv, 0, &api_key_buf);
     const model = jsStr(env, &argv, 1, &model_buf);
 
+    // Read optional baseUrl — skip isNullOrUndefined (Bun napi_is_null crashes).
+    // napi_get_value_string_utf8 on null/undefined returns len=0, which is safe.
     var base_url_buf: [1024]u8 = undefined;
     var base_url_ptr: ?[*]const u8 = null;
     var base_url_len: usize = 0;
-    if (argc >= 3 and !isNullOrUndefined(env, argv[2])) {
+    if (argc >= 3) {
         const base_url = jsStr(env, &argv, 2, &base_url_buf);
         if (base_url.len > 0) {
             base_url_ptr = base_url.ptr;
@@ -252,62 +254,29 @@ fn js_destroyToolRegistry(env: napi_env, info: napi_callback_info) callconv(.c) 
     return undefinedVal(env);
 }
 
-/// createQueryEngine({ provider, tools, systemPrompt, maxTurns, cwd })
+/// createQueryEngine(provider, tools, systemPrompt, maxTurns, cwd)
 fn js_createQueryEngine(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 1;
-    var argv: [1]napi_value = undefined;
+    // Flat positional args: provider, tools, systemPrompt, maxTurns, cwd
+    // No isNullOrUndefined calls — Bun 1.x crashes when napi_is_null is called on externals.
+    // JS wrapper guarantees: argv[0]=external, argv[1]=external|null, argv[2]=string, argv[3]=number.
+    var argc: usize = 5;
+    var argv: [5]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
-    if (argc < 1) return nullVal(env);
-    const config = argv[0];
+    if (argc < 4) return nullVal(env);
 
-    var provider_val: napi_value = undefined;
-    _ = napi_get_named_property(env, config, "provider", &provider_val);
-    const provider = unwrapHandle(env, provider_val);
+    const provider = unwrapHandle(env, argv[0]);
+    const tools = unwrapHandle(env, argv[1]);
 
-    var tools_val: napi_value = undefined;
-    _ = napi_get_named_property(env, config, "tools", &tools_val);
-    const tools: Handle = if (isNullOrUndefined(env, tools_val)) null else unwrapHandle(env, tools_val);
-
-    var sp_val: napi_value = undefined;
-    _ = napi_get_named_property(env, config, "systemPrompt", &sp_val);
     var sp_buf: [8192]u8 = undefined;
-    const system_prompt = if (isNullOrUndefined(env, sp_val)) @as([]u8, &.{}) else jsStrFromVal(env, sp_val, &sp_buf);
-
-    var mt_val: napi_value = undefined;
-    _ = napi_get_named_property(env, config, "maxTurns", &mt_val);
-    var max_turns_raw: i32 = 0;
-    _ = napi_get_value_int32(env, mt_val, &max_turns_raw);
-    const max_turns: u32 = @intCast(@max(0, max_turns_raw));
+    const system_prompt = jsStrFromVal(env, argv[2], &sp_buf);
+    const max_turns: u32 = @intCast(@max(0, jsInt32(env, &argv, 3)));
 
     const sp_ptr: ?[*]const u8 = if (system_prompt.len > 0) system_prompt.ptr else null;
     const handle = agent_create_engine(provider, tools, sp_ptr, system_prompt.len, max_turns);
     return wrapHandle(env, handle);
 }
 
-const SubmitMessageData = struct {
-    engine_handle: Handle,
-    prompt: []const u8,
-    deferred: napi_deferred,
-    env: napi_env,
-    work: napi_async_work = undefined,
-    result_handle: Handle = null,
-};
-
-fn submitMessageExecute(_: ?napi_env, data: ?*anyopaque) callconv(.c) void {
-    const d: *SubmitMessageData = @ptrCast(@alignCast(data.?));
-    d.result_handle = agent_submit_message(d.engine_handle, d.prompt.ptr, d.prompt.len);
-}
-
-fn submitMessageComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(.c) void {
-    const d: *SubmitMessageData = @ptrCast(@alignCast(data.?));
-    defer {
-        _ = napi_delete_async_work(env, d.work);
-        std.heap.c_allocator.free(d.prompt);
-        std.heap.c_allocator.destroy(d);
-    }
-    _ = napi_resolve_deferred(env, d.deferred, wrapHandle(env, d.result_handle));
-}
-
+/// submitMessage(engine, prompt) → iterHandle (synchronous for Bun compat)
 fn js_submitMessage(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
     var argc: usize = 2;
     var argv: [2]napi_value = undefined;
@@ -315,29 +284,15 @@ fn js_submitMessage(env: napi_env, info: napi_callback_info) callconv(.c) napi_v
     if (argc < 2) return nullVal(env);
     const engine = unwrapHandle(env, argv[0]);
     var prompt_buf: [65536]u8 = undefined;
-    const prompt_slice = jsStr(env, &argv, 1, &prompt_buf);
-    const prompt_dupe = std.heap.c_allocator.dupe(u8, prompt_slice) catch return nullVal(env);
-
-    var deferred: napi_deferred = undefined;
-    var promise: napi_value = undefined;
-    _ = napi_create_promise(env, &deferred, &promise);
-
-    const data = std.heap.c_allocator.create(SubmitMessageData) catch {
-        std.heap.c_allocator.free(prompt_dupe);
-        return nullVal(env);
-    };
-    data.* = .{ .engine_handle = engine, .prompt = prompt_dupe, .deferred = deferred, .env = env };
-
-    const resource_name = jsString(env, "agent_submitMessage");
-    _ = napi_create_async_work(env, null, resource_name, submitMessageExecute, submitMessageComplete, data, &data.work);
-    _ = napi_queue_async_work(env, data.work);
-    return promise;
+    const prompt = jsStr(env, &argv, 1, &prompt_buf);
+    const iter = agent_submit_message(engine, prompt.ptr, prompt.len);
+    return wrapHandle(env, iter);
 }
 
+/// nextEvent(iterator) → Promise<string | null>
 const NextEventData = struct {
     iter_handle: Handle,
     deferred: napi_deferred,
-    env: napi_env,
     work: napi_async_work = undefined,
     result_ptr: ?[*]u8 = null,
     result_len: usize = 0,
@@ -364,7 +319,6 @@ fn nextEventComplete(env: napi_env, _: napi_status, data: ?*anyopaque) callconv(
     _ = napi_resolve_deferred(env, d.deferred, result);
 }
 
-/// nextEvent(iterator) → Promise<string | null>
 fn js_nextEvent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
     var argc: usize = 1;
     var argv: [1]napi_value = undefined;
@@ -377,7 +331,7 @@ fn js_nextEvent(env: napi_env, info: napi_callback_info) callconv(.c) napi_value
     _ = napi_create_promise(env, &deferred, &promise);
 
     const data = std.heap.c_allocator.create(NextEventData) catch return nullVal(env);
-    data.* = .{ .iter_handle = iter, .deferred = deferred, .env = env };
+    data.* = .{ .iter_handle = iter, .deferred = deferred };
 
     const resource_name = jsString(env, "agent_nextEvent");
     _ = napi_create_async_work(env, null, resource_name, nextEventExecute, nextEventComplete, data, &data.work);
@@ -462,10 +416,10 @@ fn js_createSubAgent(env: napi_env, info: napi_callback_info) callconv(.c) napi_
     if (argc < 2) return nullVal(env);
 
     const provider = unwrapHandle(env, argv[0]);
-    const tools: Handle = if (argc >= 2 and !isNullOrUndefined(env, argv[1])) unwrapHandle(env, argv[1]) else null;
+    const tools: Handle = if (argc >= 2) unwrapHandle(env, argv[1]) else null;
 
     var sp_buf: [8192]u8 = undefined;
-    const sp = if (argc >= 3 and !isNullOrUndefined(env, argv[2])) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
+    const sp = if (argc >= 3) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
     const max_turns: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 50;
 
     const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;
@@ -548,10 +502,10 @@ fn js_createTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_valu
     if (argc < 2) return nullVal(env);
 
     const lead_provider = unwrapHandle(env, argv[0]);
-    const lead_tools: Handle = if (argc >= 2 and !isNullOrUndefined(env, argv[1])) unwrapHandle(env, argv[1]) else null;
+    const lead_tools: Handle = if (argc >= 2) unwrapHandle(env, argv[1]) else null;
 
     var sp_buf: [8192]u8 = undefined;
-    const sp = if (argc >= 3 and !isNullOrUndefined(env, argv[2])) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
+    const sp = if (argc >= 3) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
     const max_turns: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 20;
 
     const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;

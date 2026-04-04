@@ -77,9 +77,13 @@ pub const QueryEngine = struct {
         // Free any previous loop before starting a new one.
         self.freeCurrentLoop();
 
+        // Heap-allocate the content slice — &.{...} creates a stack temporary that
+        // becomes dangling after this function returns.
+        const content = self.allocator.alloc(message_mod.ContentBlock, 1) catch return streaming.EventIterator{ .context = undefined, .nextFn = undefined };
+        content[0] = .{ .text = prompt };
         const user_msg = message_mod.Message{ .user = .{
             .header = message_mod.Header.init(),
-            .content = &.{.{ .text = prompt }},
+            .content = content,
         } };
         self.messages.append(user_msg) catch {};
         self.session.record("{\"type\":\"user\"}") catch {};

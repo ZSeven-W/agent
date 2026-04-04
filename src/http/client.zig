@@ -75,9 +75,12 @@ pub const HttpClient = struct {
     /// so that internal pointers inside `Response` remain valid after the struct is
     /// moved.  Call `close()` on the returned value to release it.
     pub fn streamRequest(self: *HttpClient, req: HttpRequest) HttpError!StreamingResponse {
-        const uri = std.Uri.parse(req.url) catch return error.ConnectionFailed;
+        std.debug.print("[http] url={s}\n", .{req.url});
+        const uri = std.Uri.parse(req.url) catch {
+            std.debug.print("[http] URI parse failed\n", .{});
+            return error.ConnectionFailed;
+        };
 
-        // Build extra_headers slice from our header format.
         var extra_headers: std.ArrayList(std.http.Header) = .{};
         defer extra_headers.deinit(self.allocator);
         for (req.headers) |h| {
@@ -87,29 +90,40 @@ pub const HttpClient = struct {
             }) catch return error.OutOfMemory;
         }
 
-        // Heap-allocate Request so that `Response.request` (a `*Request`) remains
-        // valid even after this function returns and StreamingResponse is moved.
         const request = self.allocator.create(std.http.Client.Request) catch return error.OutOfMemory;
         errdefer {
             request.deinit();
             self.allocator.destroy(request);
         }
 
+        std.debug.print("[http] connecting...\n", .{});
         request.* = self.client.request(req.method, uri, .{
             .extra_headers = extra_headers.items,
-        }) catch return error.ConnectionFailed;
+        }) catch |err| {
+            std.debug.print("[http] request failed: {s}\n", .{@errorName(err)});
+            return error.ConnectionFailed;
+        };
 
+        std.debug.print("[http] sending body...\n", .{});
         if (req.body) |body| {
-            // sendBodyComplete requires []u8; body is []const u8.
-            // The function does not mutate the slice content, so this cast is safe.
-            request.sendBodyComplete(@constCast(body)) catch return error.ConnectionFailed;
+            request.sendBodyComplete(@constCast(body)) catch |err| {
+                std.debug.print("[http] send body failed: {s}\n", .{@errorName(err)});
+                return error.ConnectionFailed;
+            };
         } else {
-            request.sendBodiless() catch return error.ConnectionFailed;
+            request.sendBodiless() catch |err| {
+                std.debug.print("[http] send bodiless failed: {s}\n", .{@errorName(err)});
+                return error.ConnectionFailed;
+            };
         }
 
-        // Redirect buffer: only needed during receiveHead; can be stack-allocated.
+        std.debug.print("[http] waiting for response...\n", .{});
         var redirect_buf: [4 * 1024]u8 = undefined;
-        const response = request.receiveHead(&redirect_buf) catch return error.ConnectionFailed;
+        const response = request.receiveHead(&redirect_buf) catch |err| {
+            std.debug.print("[http] receiveHead failed: {s}\n", .{@errorName(err)});
+            return error.ConnectionFailed;
+        };
+        std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
 
         return .{
             .allocator = self.allocator,
