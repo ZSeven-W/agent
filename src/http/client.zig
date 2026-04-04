@@ -104,6 +104,17 @@ pub const HttpClient = struct {
             return error.ConnectionFailed;
         };
 
+        // Save body preview BEFORE sendBodyComplete — it uses the body buffer
+        // as a write buffer and overwrites the original content.
+        var body_preview: [2000]u8 = undefined;
+        var body_preview_len: usize = 0;
+        var body_total_len: usize = 0;
+        if (req.body) |b| {
+            body_total_len = b.len;
+            body_preview_len = @min(b.len, 2000);
+            @memcpy(body_preview[0..body_preview_len], b[0..body_preview_len]);
+        }
+
         std.debug.print("[http] sending body...\n", .{});
         if (req.body) |body| {
             request.sendBodyComplete(@constCast(body)) catch |err| {
@@ -125,14 +136,13 @@ pub const HttpClient = struct {
         };
         std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
 
-        // For error responses, read and print diagnostics BEFORE the Response
-        // is moved into StreamingResponse — reader() panics on the moved copy
-        // when some servers omit proper Content-Length/Transfer-Encoding.
+        // For error responses, print diagnostics.
         if (response.head.status != .ok) {
-            if (req.body) |b| {
-                const preview = if (b.len > 2000) b[0..2000] else b;
-                std.debug.print("[http] request body ({d} bytes): {s}\n", .{ b.len, preview });
+            if (body_preview_len > 0) {
+                std.debug.print("[http] request body ({d} bytes): {s}\n", .{ body_total_len, body_preview[0..body_preview_len] });
             }
+            // Read error response body while Response is at original stack location.
+            // reader() panics after the Response is moved into StreamingResponse.
             var err_buf: [4096]u8 = undefined;
             var err_transfer_buf: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer_buf);
