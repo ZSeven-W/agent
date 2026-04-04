@@ -673,14 +673,17 @@ fn js_runTeamMember(env: napi_env, info: napi_callback_info) callconv(.c) napi_v
     const member_id_slice = jsStr(env, &argv, 1, &id_buf);
     const member_id = std.heap.c_allocator.dupe(u8, member_id_slice) catch return nullVal(env);
 
-    // Get task string
+    // Get task string — allocate len+1 for NUL terminator that
+    // napi_get_value_string_utf8 writes. Without the +1, the NUL overflows
+    // into adjacent heap metadata, corrupting subsequent allocations.
     var task_len: usize = 0;
     _ = napi_get_value_string_utf8(env, argv[2], null, 0, &task_len);
-    const task = std.heap.c_allocator.alloc(u8, task_len) catch {
+    const task_buf = std.heap.c_allocator.alloc(u8, task_len + 1) catch {
         std.heap.c_allocator.free(member_id);
         return nullVal(env);
     };
-    _ = napi_get_value_string_utf8(env, argv[2], task.ptr, task.len + 1, &task_len);
+    _ = napi_get_value_string_utf8(env, argv[2], task_buf.ptr, task_buf.len, &task_len);
+    const task = task_buf[0..task_len];
 
     var deferred: napi_deferred = undefined;
     var promise: napi_value = undefined;
