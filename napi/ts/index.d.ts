@@ -12,8 +12,8 @@ export interface AgentEvent {
 }
 
 // ─── Provider lifecycle ───
-export declare function createAnthropicProvider(apiKey: string, model: string, baseUrl?: string): ProviderHandle;
-export declare function createOpenAICompatProvider(apiKey: string, baseUrl: string, model: string): ProviderHandle;
+export declare function createAnthropicProvider(apiKey: string, model: string, baseUrl?: string, maxContextTokens?: number): ProviderHandle;
+export declare function createOpenAICompatProvider(apiKey: string, baseUrl: string, model: string, maxContextTokens?: number): ProviderHandle;
 export declare function destroyProvider(handle: ProviderHandle): void;
 
 // ─── Tool registry ───
@@ -27,6 +27,7 @@ export declare function createQueryEngine(config: {
   tools?: ToolRegistryHandle;
   systemPrompt?: string;
   maxTurns?: number;
+  maxOutputTokens?: number;
   cwd: string;
 }): QueryEngineHandle;
 export declare function seedMessages(engine: QueryEngineHandle, messagesJson: string): void;
@@ -50,7 +51,7 @@ export declare function destroySubAgent(handle: SubAgentHandle): void;
 
 // ─── Team ───
 export type TeamHandle = object & { readonly __brand: "TeamHandle" };
-export declare function createTeam(leadProvider: ProviderHandle, leadTools: ToolRegistryHandle | null, leadSystemPrompt: string, leadMaxTurns: number): TeamHandle;
+export declare function createTeam(leadProvider: ProviderHandle, leadTools: ToolRegistryHandle | null, leadSystemPrompt: string, leadMaxTurns: number, leadMaxOutputTokens?: number): TeamHandle;
 export declare function addTeamMember(
   team: TeamHandle,
   memberId: string,

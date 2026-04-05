@@ -36,6 +36,7 @@ export fn agent_create_anthropic_provider(
     model_len: usize,
     base_url_ptr: ?[*]const u8,
     base_url_len: usize,
+    max_context_tokens: u32,
 ) AgentProviderHandle {
     const allocator = std.heap.c_allocator;
     // Heap-duplicate all strings — caller's buffers are on the stack.
@@ -57,7 +58,7 @@ export fn agent_create_anthropic_provider(
     const vtable_ptr = allocator.create(providers_types.Provider.VTable) catch return null;
     vtable_ptr.* = .{
         .id = "anthropic",
-        .max_context_tokens = 200_000,
+        .max_context_tokens = if (max_context_tokens > 0) max_context_tokens else 200_000,
         .supports_thinking = true,
         .supports_tool_use = true,
         .stream_text = providers_mod.AnthropicProvider.streamTextFn(),
@@ -78,6 +79,7 @@ export fn agent_create_engine(
     system_prompt_ptr: ?[*]const u8,
     system_prompt_len: usize,
     max_turns: u32,
+    max_output_tokens: u32,
 ) AgentEngineHandle {
     if (provider_handle == null) return null;
     const allocator = std.heap.c_allocator;
@@ -119,6 +121,7 @@ export fn agent_create_engine(
         .context_strategy = strategy_ptr,
         .system_prompt = system_prompt,
         .max_turns = if (max_turns > 0) max_turns else 50,
+        .max_output_tokens = if (max_output_tokens > 0) max_output_tokens else 200_000,
     });
     return @ptrCast(engine);
 }
@@ -139,6 +142,7 @@ export fn agent_create_openai_compat_provider(
     base_url_len: usize,
     model_ptr: [*]const u8,
     model_len: usize,
+    max_context_tokens: u32,
 ) AgentProviderHandle {
     const allocator = std.heap.c_allocator;
     const api_key = allocator.dupe(u8, api_key_ptr[0..api_key_len]) catch return null;
@@ -157,7 +161,7 @@ export fn agent_create_openai_compat_provider(
     const vtable_ptr = allocator.create(providers_types.Provider.VTable) catch return null;
     vtable_ptr.* = .{
         .id = "openai_compat",
-        .max_context_tokens = 128_000,
+        .max_context_tokens = if (max_context_tokens > 0) max_context_tokens else 200_000,
         .supports_thinking = false,
         .supports_tool_use = true,
         .stream_text = providers_mod.OpenAICompatProvider.streamTextFn(),
@@ -394,6 +398,7 @@ export fn agent_create_team(
     lead_system_prompt_ptr: ?[*]const u8,
     lead_system_prompt_len: usize,
     lead_max_turns: u32,
+    lead_max_output_tokens: u32,
 ) ?*anyopaque {
     if (lead_provider == null) return null;
     const allocator = std.heap.c_allocator;
@@ -417,6 +422,7 @@ export fn agent_create_team(
         .lead_tools = tools,
         .lead_system_prompt = lead_system_prompt,
         .lead_max_turns = if (lead_max_turns > 0) lead_max_turns else 20,
+        .lead_max_output_tokens = if (lead_max_output_tokens > 0) lead_max_output_tokens else 8192,
         .members = &.{},
     }) catch return null;
     return @ptrCast(t);

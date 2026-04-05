@@ -69,8 +69,12 @@ pub const OpenAICompatProvider = struct {
                 "{s}/openai/deployments/{s}/chat/completions?api-version={s}",
                 .{ base_url, self.config.base.model, api_ver },
             ) catch return error.InvalidRequest;
-        } else std.fmt.allocPrint(self.allocator, "{s}/v1/chat/completions", .{base_url}) catch
-            return error.InvalidRequest;
+        } else if (types.urlEndsWithVersion(base_url))
+            std.fmt.allocPrint(self.allocator, "{s}/chat/completions", .{base_url}) catch
+                return error.InvalidRequest
+        else
+            std.fmt.allocPrint(self.allocator, "{s}/v1/chat/completions", .{base_url}) catch
+                return error.InvalidRequest;
 
         const auth_header = std.fmt.allocPrint(
             self.allocator,

@@ -8,7 +8,7 @@ pub const JsonValue = json_mod.JsonValue;
 pub const StreamDelta = streaming_events.StreamDelta;
 
 pub const StreamConfig = struct {
-    max_tokens: u32 = 8192,
+    max_tokens: u32 = 200_000,
     system_prompt: ?[]const u8 = null,
     temperature: ?f32 = null,
     thinking: ?ThinkingConfig = null,
@@ -80,6 +80,32 @@ pub const Provider = struct {
         return self.vtable.supports_thinking;
     }
 };
+
+/// Check whether a base URL already ends with a version segment (e.g. /v1, /v3, /v4).
+/// When true, providers should NOT prepend an extra `/v1` prefix.
+pub fn urlEndsWithVersion(url: []const u8) bool {
+    var end: usize = url.len;
+    while (end > 0 and url[end - 1] == '/') end -= 1;
+    const trimmed = url[0..end];
+    const last_slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return false;
+    const seg = trimmed[last_slash + 1 ..];
+    if (seg.len < 2 or seg[0] != 'v') return false;
+    for (seg[1..]) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+test "urlEndsWithVersion" {
+    try std.testing.expect(!urlEndsWithVersion("https://api.openai.com"));
+    try std.testing.expect(urlEndsWithVersion("https://api.openai.com/v1"));
+    try std.testing.expect(urlEndsWithVersion("https://api.openai.com/v1/"));
+    try std.testing.expect(urlEndsWithVersion("https://ark.cn-beijing.volces.com/api/v3"));
+    try std.testing.expect(urlEndsWithVersion("https://open.bigmodel.cn/api/paas/v4"));
+    try std.testing.expect(!urlEndsWithVersion("https://generativelanguage.googleapis.com/v1beta/openai"));
+    try std.testing.expect(!urlEndsWithVersion("https://api.groq.com/openai"));
+    try std.testing.expect(!urlEndsWithVersion(""));
+}
 
 /// Iterates over stream chunks from a provider response.
 pub const StreamIterator = struct {

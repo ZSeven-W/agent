@@ -24,6 +24,7 @@ pub const TeamMemberConfig = struct {
     tools: *tools_reg.ToolRegistry,
     system_prompt: ?[]const u8 = null,
     max_turns: u32 = 20,
+    max_output_tokens: u32 = 200_000,
 };
 
 pub const TeamConfig = struct {
@@ -32,6 +33,7 @@ pub const TeamConfig = struct {
     lead_tools: *tools_reg.ToolRegistry,
     lead_system_prompt: ?[]const u8 = null,
     lead_max_turns: u32 = 20,
+    lead_max_output_tokens: u32 = 8192,
     members: []const TeamMemberConfig,
 };
 
@@ -95,6 +97,7 @@ pub const Team = struct {
                 .context_strategy = m_strat,
                 .system_prompt = m.system_prompt,
                 .max_turns = m.max_turns,
+                .max_output_tokens = m.max_output_tokens,
             }));
         }
 
@@ -126,6 +129,7 @@ pub const Team = struct {
                 .context_strategy = l_strat,
                 .system_prompt = config.lead_system_prompt,
                 .max_turns = config.lead_max_turns,
+                .max_output_tokens = config.lead_max_output_tokens,
             }),
             .members = members,
             .abort = .{},
@@ -193,6 +197,7 @@ pub const Team = struct {
             .context_strategy = m_strat,
             .system_prompt = config.system_prompt,
             .max_turns = config.max_turns,
+            .max_output_tokens = config.max_output_tokens,
         }));
     }
 

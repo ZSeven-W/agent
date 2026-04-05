@@ -52,6 +52,7 @@ pub const QueryParams = struct {
     file_cache: *file_cache_mod.FileStateCache,
     system_prompt: ?[]const u8 = null,
     max_turns: u32 = 50,
+    max_output_tokens: u32 = 200_000,
     max_budget_usd: ?f64 = null,
     external_queue: ?*etq_mod.ExternalToolQueue = null,
 };
@@ -66,6 +67,56 @@ pub fn queryLoop(params: QueryParams, initial_messages: *message_mod.MessageStor
         },
         .phase = .start,
     };
+}
+
+/// Convert ContentBlock slice to a JsonValue suitable for the API.
+/// If the slice has a single text block, return a plain string.
+/// Otherwise return a JSON array with typed objects (text, tool_use, tool_result).
+fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod.ContentBlock) !json_mod.JsonValue {
+    // Fast path: single text block → plain string
+    if (blocks.len == 1) {
+        switch (blocks[0]) {
+            .text => |t| return .{ .string = t },
+            else => {},
+        }
+    }
+    if (blocks.len == 0) return .{ .string = "" };
+
+    var arr = std.json.Array.init(allocator);
+    for (blocks) |block| {
+        switch (block) {
+            .text => |t| {
+                var obj = std.json.ObjectMap.init(allocator);
+                try obj.put("type", .{ .string = "text" });
+                try obj.put("text", .{ .string = t });
+                try arr.append(.{ .object = obj });
+            },
+            .tool_use => |tu| {
+                var obj = std.json.ObjectMap.init(allocator);
+                try obj.put("type", .{ .string = "tool_use" });
+                try obj.put("id", .{ .string = tu.id });
+                try obj.put("name", .{ .string = tu.name });
+                try obj.put("input", tu.input);
+                try arr.append(.{ .object = obj });
+            },
+            .tool_result => |tr| {
+                var obj = std.json.ObjectMap.init(allocator);
+                try obj.put("type", .{ .string = "tool_result" });
+                try obj.put("tool_use_id", .{ .string = tr.tool_use_id });
+                // Anthropic API requires content to be a string, not a JSON object
+                const content_val: json_mod.JsonValue = switch (tr.content) {
+                    .string => tr.content,
+                    else => .{ .string = json_mod.stringify(allocator, tr.content) catch "" },
+                };
+                try obj.put("content", content_val);
+                if (tr.is_error) try obj.put("is_error", .{ .bool = true });
+                try arr.append(.{ .object = obj });
+            },
+            .thinking => {},
+            .image => {},
+        }
+    }
+    return .{ .array = arr };
 }
 
 pub const QueryLoopIterator = struct {
@@ -83,6 +134,8 @@ pub const QueryLoopIterator = struct {
     tool_exec: ?tool_executor_mod.StreamingToolExecutor = null,
     // Accumulates partial_json fragments for the current tool_use input
     tool_json_buf: std.ArrayListUnmanaged(u8) = .{},
+    // Accumulates text_delta fragments for the assistant message
+    text_buf: std.ArrayListUnmanaged(u8) = .{},
 
     const Phase = enum {
         start,
@@ -93,6 +146,60 @@ pub const QueryLoopIterator = struct {
         yielding_result,
         done,
     };
+
+    /// Flush any pending partial tool JSON into the last tracked tool's input.
+    /// Called when the stream ends (message_stop or exhaustion) to handle cases
+    /// where the model's output was truncated before content_block_stop.
+    fn flushPendingToolInput(self: *QueryLoopIterator) void {
+        if (self.tool_exec == null or self.tool_json_buf.items.len == 0) return;
+        const parsed_input = json_mod.parse(self.params.allocator, self.tool_json_buf.items) catch null;
+        if (parsed_input) |p| {
+            const tracked = self.tool_exec.?.tracked.items;
+            if (tracked.len > 0) {
+                tracked[tracked.len - 1].block.input = p.value;
+            }
+        }
+        self.tool_json_buf.clearRetainingCapacity();
+    }
+
+    /// Store the accumulated assistant message (text + tool_use blocks) in the message store.
+    fn storeAssistantMessage(self: *QueryLoopIterator) void {
+        const has_text = self.text_buf.items.len > 0;
+        const has_tools = self.tool_exec != null and self.tool_exec.?.tracked.items.len > 0;
+        if (!has_text and !has_tools) return;
+
+        // Count content blocks needed
+        var block_count: usize = 0;
+        if (has_text) block_count += 1;
+        if (has_tools) block_count += self.tool_exec.?.tracked.items.len;
+
+        const content = self.params.allocator.alloc(message_mod.ContentBlock, block_count) catch return;
+        var idx: usize = 0;
+
+        if (has_text) {
+            const text_copy = self.params.allocator.dupe(u8, self.text_buf.items) catch return;
+            content[idx] = .{ .text = text_copy };
+            idx += 1;
+        }
+
+        if (has_tools) {
+            for (self.tool_exec.?.tracked.items) |tracked| {
+                content[idx] = .{ .tool_use = .{
+                    .id = tracked.block.id,
+                    .name = tracked.block.name,
+                    .input = tracked.block.input,
+                } };
+                idx += 1;
+            }
+        }
+
+        self.state.messages.append(.{ .assistant = .{
+            .header = message_mod.Header.init(),
+            .content = content,
+        } }) catch {};
+
+        self.text_buf.clearRetainingCapacity();
+    }
 
     pub fn toEventIterator(self: *QueryLoopIterator) EventIterator {
         return .{
@@ -139,7 +246,7 @@ pub const QueryLoopIterator = struct {
 
                 self.state.turn_count += 1;
 
-                // Convert MessageStore to ApiMessages
+                // Convert MessageStore to ApiMessages (preserving tool_use / tool_result blocks)
                 var api_messages: std.ArrayList(providers_types.ApiMessage) = .{};
                 defer api_messages.deinit(self.params.allocator);
 
@@ -147,23 +254,17 @@ pub const QueryLoopIterator = struct {
                 for (messages_slice) |msg| {
                     switch (msg) {
                         .user => |u| {
-                            const text: []const u8 = if (u.content.len > 0) switch (u.content[0]) {
-                                .text => |t| t,
-                                else => "",
-                            } else "";
+                            const content = contentBlocksToJson(self.params.allocator, u.content) catch json_mod.JsonValue{ .string = "" };
                             api_messages.append(self.params.allocator, .{
                                 .role = "user",
-                                .content = .{ .string = text },
+                                .content = content,
                             }) catch {};
                         },
                         .assistant => |a| {
-                            const text: []const u8 = if (a.content.len > 0) switch (a.content[0]) {
-                                .text => |t| t,
-                                else => "",
-                            } else "";
+                            const content = contentBlocksToJson(self.params.allocator, a.content) catch json_mod.JsonValue{ .string = "" };
                             api_messages.append(self.params.allocator, .{
                                 .role = "assistant",
-                                .content = .{ .string = text },
+                                .content = content,
                             }) catch {};
                         },
                         else => {},
@@ -183,7 +284,7 @@ pub const QueryLoopIterator = struct {
                     self.params.provider.ptr,
                     api_messages.items,
                     tools_param,
-                    .{ .system_prompt = self.params.system_prompt },
+                    .{ .max_tokens = self.params.max_output_tokens, .system_prompt = self.params.system_prompt },
                 );
 
                 if (stream_result) |iter| {
@@ -230,6 +331,13 @@ pub const QueryLoopIterator = struct {
                             }, uuid) catch {};
                         }
 
+                        // Accumulate text for assistant message history
+                        if (delta.@"type" == .text_delta) {
+                            if (delta.text) |t| {
+                                self.text_buf.appendSlice(self.params.allocator, t) catch {};
+                            }
+                        }
+
                         // Accumulate tool input JSON fragments
                         if (delta.@"type" == .tool_use_delta) {
                             if (delta.partial_json) |pj| {
@@ -251,6 +359,8 @@ pub const QueryLoopIterator = struct {
                         }
 
                         if (delta.@"type" == .message_stop) {
+                            self.flushPendingToolInput();
+                            self.storeAssistantMessage();
                             if (self.tool_exec != null and self.tool_exec.?.pendingCount() > 0) {
                                 self.phase = .tool_dispatch;
                             } else {
@@ -261,7 +371,9 @@ pub const QueryLoopIterator = struct {
                         return .{ .stream_event = delta };
                     }
                 }
-                // Stream exhausted
+                // Stream exhausted (may be truncated by max_tokens)
+                self.flushPendingToolInput();
+                self.storeAssistantMessage();
                 if (self.tool_exec != null and self.tool_exec.?.pendingCount() > 0) {
                     self.phase = .tool_dispatch;
                 } else {
@@ -428,9 +540,11 @@ pub const QueryLoopIterator = struct {
                         },
                     };
 
+                    const content = self.params.allocator.alloc(message_mod.ContentBlock, 1) catch continue;
+                    content[0] = result_block;
                     self.state.messages.append(.{ .user = .{
                         .header = message_mod.Header.init(),
-                        .content = &.{result_block},
+                        .content = content,
                     } }) catch {};
 
                     self.params.session.record("{\"type\":\"tool_result\"}") catch {};

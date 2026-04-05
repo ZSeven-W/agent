@@ -52,7 +52,10 @@ pub const AnthropicProvider = struct {
             return error.InvalidRequest;
 
         const url = if (self.config.base_url) |bu|
-            std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{bu}) catch return error.InvalidRequest
+            if (types.urlEndsWithVersion(bu))
+                std.fmt.allocPrint(self.allocator, "{s}/messages", .{bu}) catch return error.InvalidRequest
+            else
+                std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{bu}) catch return error.InvalidRequest
         else
             std.fmt.allocPrint(self.allocator, "https://api.anthropic.com/v1/messages", .{}) catch return error.InvalidRequest;
 

@@ -80,10 +80,10 @@ extern fn napi_get_named_property(env: napi_env, object: napi_value, utf8name: [
 const Handle = ?*anyopaque;
 
 extern fn agent_version() [*:0]const u8;
-extern fn agent_create_anthropic_provider(api_key_ptr: [*]const u8, api_key_len: usize, model_ptr: [*]const u8, model_len: usize, base_url_ptr: ?[*]const u8, base_url_len: usize) Handle;
-extern fn agent_create_openai_compat_provider(api_key_ptr: [*]const u8, api_key_len: usize, base_url_ptr: [*]const u8, base_url_len: usize, model_ptr: [*]const u8, model_len: usize) Handle;
+extern fn agent_create_anthropic_provider(api_key_ptr: [*]const u8, api_key_len: usize, model_ptr: [*]const u8, model_len: usize, base_url_ptr: ?[*]const u8, base_url_len: usize, max_context_tokens: u32) Handle;
+extern fn agent_create_openai_compat_provider(api_key_ptr: [*]const u8, api_key_len: usize, base_url_ptr: [*]const u8, base_url_len: usize, model_ptr: [*]const u8, model_len: usize, max_context_tokens: u32) Handle;
 extern fn agent_destroy_provider(handle: Handle) void;
-extern fn agent_create_engine(provider: Handle, tools: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32) Handle;
+extern fn agent_create_engine(provider: Handle, tools: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32, max_output_tokens: u32) Handle;
 extern fn agent_destroy_engine(handle: Handle) void;
 extern fn agent_submit_message(engine: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
 extern fn agent_destroy_iterator(handle: Handle) void;
@@ -100,7 +100,7 @@ extern fn agent_create_sub_agent(provider: Handle, tools: Handle, sp_ptr: ?[*]co
 extern fn agent_sub_agent_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
 extern fn agent_abort_sub_agent(handle: Handle) void;
 extern fn agent_destroy_sub_agent(handle: Handle) void;
-extern fn agent_create_team(lead_provider: Handle, lead_tools: Handle, sp_ptr: ?[*]const u8, sp_len: usize, max_turns: u32) Handle;
+extern fn agent_create_team(lead_provider: Handle, lead_tools: Handle, sp_ptr: ?[*]const u8, sp_len: usize, max_turns: u32, max_output_tokens: u32) Handle;
 extern fn agent_team_add_member(team_handle: Handle, member_id_ptr: [*]const u8, member_id_len: usize, provider_handle: Handle, tools_handle: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32) bool;
 extern fn agent_team_run(handle: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
 extern fn agent_resolve_team_tool_result(handle: Handle, id_ptr: [*]const u8, id_len: usize, res_ptr: [*]const u8, res_len: usize) void;
@@ -182,8 +182,8 @@ fn js_agentVersion(env: napi_env, info: napi_callback_info) callconv(.c) napi_va
 }
 
 fn js_createAnthropicProvider(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 3;
-    var argv: [3]napi_value = undefined;
+    var argc: usize = 4;
+    var argv: [4]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 2) return nullVal(env);
 
@@ -204,14 +204,15 @@ fn js_createAnthropicProvider(env: napi_env, info: napi_callback_info) callconv(
             base_url_len = base_url.len;
         }
     }
+    const max_ctx: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 0;
 
-    const handle = agent_create_anthropic_provider(api_key.ptr, api_key.len, model.ptr, model.len, base_url_ptr, base_url_len);
+    const handle = agent_create_anthropic_provider(api_key.ptr, api_key.len, model.ptr, model.len, base_url_ptr, base_url_len, max_ctx);
     return wrapHandle(env, handle);
 }
 
 fn js_createOpenAICompatProvider(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 3;
-    var argv: [3]napi_value = undefined;
+    var argc: usize = 4;
+    var argv: [4]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 3) return nullVal(env);
 
@@ -221,8 +222,9 @@ fn js_createOpenAICompatProvider(env: napi_env, info: napi_callback_info) callco
     const api_key = jsStr(env, &argv, 0, &api_key_buf);
     const base_url = jsStr(env, &argv, 1, &base_url_buf);
     const model = jsStr(env, &argv, 2, &model_buf);
+    const max_ctx: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 0;
 
-    const handle = agent_create_openai_compat_provider(api_key.ptr, api_key.len, base_url.ptr, base_url.len, model.ptr, model.len);
+    const handle = agent_create_openai_compat_provider(api_key.ptr, api_key.len, base_url.ptr, base_url.len, model.ptr, model.len, max_ctx);
     return wrapHandle(env, handle);
 }
 
@@ -263,13 +265,11 @@ fn js_destroyToolRegistry(env: napi_env, info: napi_callback_info) callconv(.c) 
     return undefinedVal(env);
 }
 
-/// createQueryEngine(provider, tools, systemPrompt, maxTurns, cwd)
+/// createQueryEngine(provider, tools, systemPrompt, maxTurns, cwd, maxOutputTokens)
 fn js_createQueryEngine(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    // Flat positional args: provider, tools, systemPrompt, maxTurns, cwd
-    // No isNullOrUndefined calls — Bun 1.x crashes when napi_is_null is called on externals.
-    // JS wrapper guarantees: argv[0]=external, argv[1]=external|null, argv[2]=string, argv[3]=number.
-    var argc: usize = 5;
-    var argv: [5]napi_value = undefined;
+    // Flat positional args: provider, tools, systemPrompt, maxTurns, cwd, maxOutputTokens
+    var argc: usize = 6;
+    var argv: [6]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 4) return nullVal(env);
 
@@ -279,9 +279,11 @@ fn js_createQueryEngine(env: napi_env, info: napi_callback_info) callconv(.c) na
     var sp_buf: [8192]u8 = undefined;
     const system_prompt = jsStrFromVal(env, argv[2], &sp_buf);
     const max_turns: u32 = @intCast(@max(0, jsInt32(env, &argv, 3)));
+    // argv[4] is cwd (unused in current impl), argv[5] is maxOutputTokens
+    const max_output_tokens: u32 = if (argc >= 6) @intCast(@max(0, jsInt32(env, &argv, 5))) else 0;
 
     const sp_ptr: ?[*]const u8 = if (system_prompt.len > 0) system_prompt.ptr else null;
-    const handle = agent_create_engine(provider, tools, sp_ptr, system_prompt.len, max_turns);
+    const handle = agent_create_engine(provider, tools, sp_ptr, system_prompt.len, max_turns, max_output_tokens);
     return wrapHandle(env, handle);
 }
 
@@ -505,8 +507,8 @@ fn js_subAgentRun(env: napi_env, info: napi_callback_info) callconv(.c) napi_val
 // ─── Team wrappers ───────────────────────────────────────────────────────────
 
 fn js_createTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
-    var argc: usize = 4;
-    var argv: [4]napi_value = undefined;
+    var argc: usize = 5;
+    var argv: [5]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc < 2) return nullVal(env);
 
@@ -516,9 +518,10 @@ fn js_createTeam(env: napi_env, info: napi_callback_info) callconv(.c) napi_valu
     var sp_buf: [8192]u8 = undefined;
     const sp = if (argc >= 3) jsStr(env, &argv, 2, &sp_buf) else @as([]u8, &.{});
     const max_turns: u32 = if (argc >= 4) @intCast(@max(0, jsInt32(env, &argv, 3))) else 20;
+    const max_output_tokens: u32 = if (argc >= 5) @intCast(@max(0, jsInt32(env, &argv, 4))) else 0;
 
     const sp_ptr: ?[*]const u8 = if (sp.len > 0) sp.ptr else null;
-    return wrapHandle(env, agent_create_team(lead_provider, lead_tools, sp_ptr, sp.len, max_turns));
+    return wrapHandle(env, agent_create_team(lead_provider, lead_tools, sp_ptr, sp.len, max_turns, max_output_tokens));
 }
 
 fn js_addTeamMember(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
