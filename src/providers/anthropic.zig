@@ -169,11 +169,13 @@ const AnthropicStreamState = struct {
         if (self.drainParsedEvent()) |delta| return delta;
 
         // 2. Read ONE chunk from the HTTP response
-        const n = self.response.readChunk(&self.read_buf) catch {
+        const n = self.response.readChunk(&self.read_buf) catch |err| {
+            std.debug.print("[http-stream] readChunk error: {s}\n", .{@errorName(err)});
             self.done = true;
             return null;
         };
         if (n == 0) {
+            std.debug.print("[http-stream] readChunk returned 0 (EOF)\n", .{});
             self.done = true;
             return null;
         }
@@ -206,7 +208,12 @@ const AnthropicStreamState = struct {
     }
 
     fn parseSseToStreamDelta(allocator: std.mem.Allocator, sse: sse_parser_mod.SseEvent) ?types.StreamDelta {
-        const event_type = sse.event orelse return null;
+        const event_type = sse.event orelse {
+            // Log data-only events (no event: field) for debugging
+            const preview_len = @min(sse.data.len, 100);
+            std.debug.print("[http-stream] SSE event without type, data[0..{d}]: {s}\n", .{ preview_len, sse.data[0..preview_len] });
+            return null;
+        };
 
         if (std.mem.eql(u8, event_type, "message_start")) {
             return .{ .@"type" = .message_start };
