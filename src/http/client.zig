@@ -135,25 +135,18 @@ pub const HttpClient = struct {
 
         std.debug.print("[http] waiting for response...\n", .{});
         var redirect_buf: [4 * 1024]u8 = undefined;
-        var response = request.receiveHead(&redirect_buf) catch |err| {
+        const response = request.receiveHead(&redirect_buf) catch |err| {
             std.debug.print("[http] receiveHead failed: {s}\n", .{@errorName(err)});
             return error.ConnectionFailed;
         };
         std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
 
-        // For error responses, print diagnostics.
+        // For error responses, log status and request body preview.
+        // Do NOT read response body — response.reader() panics on some
+        // providers that send error responses without proper transfer encoding.
         if (response.head.status != .ok) {
             if (body_preview_len > 0) {
                 std.debug.print("[http] request body ({d} bytes): {s}\n", .{ body_total_len, body_preview[0..body_preview_len] });
-            }
-            // Read error response body while Response is at original stack location.
-            // reader() panics after the Response is moved into StreamingResponse.
-            var err_buf: [4096]u8 = undefined;
-            var err_transfer_buf: [8 * 1024]u8 = undefined;
-            const err_reader = response.reader(&err_transfer_buf);
-            const err_n = err_reader.readSliceShort(&err_buf) catch 0;
-            if (err_n > 0) {
-                std.debug.print("[http] response body: {s}\n", .{err_buf[0..err_n]});
             }
         }
 
