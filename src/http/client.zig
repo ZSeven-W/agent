@@ -59,8 +59,13 @@ pub const HttpClient = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) HttpClient {
+        var client = std.http.Client{ .allocator = allocator };
+        // Disable connection pooling — each request uses a fresh TCP connection.
+        // Pooled connections from providers that silently close SSE streams cause
+        // Bus errors and corrupted state on reuse.
+        client.connection_pool.free_size = 0;
         return .{
-            .client = std.http.Client{ .allocator = allocator },
+            .client = client,
             .allocator = allocator,
         };
     }
