@@ -165,11 +165,18 @@ const OpenAIStreamState = struct {
     allocator: std.mem.Allocator,
     read_buf: [8192]u8,
     done: bool = false,
+    cleaned: bool = false,
 
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *OpenAIStreamState = @ptrCast(@alignCast(ctx));
+
         if (self.done) {
-            // Already cleaned up — do NOT touch self further.
+            if (!self.cleaned) {
+                self.cleaned = true;
+                self.parser.deinit();
+                self.response.close();
+                self.http.deinit();
+            }
             return null;
         }
 
@@ -178,16 +185,16 @@ const OpenAIStreamState = struct {
         }
 
         const n = self.response.readChunk(&self.read_buf) catch {
-            self.cleanup();
+            self.done = true;
             return null;
         };
         if (n == 0) {
-            self.cleanup();
+            self.done = true;
             return null;
         }
 
         self.parser.feed(self.read_buf[0..n]) catch {
-            self.cleanup();
+            self.done = true;
             return null;
         };
         if (self.parser.next()) |sse_event| {
@@ -197,9 +204,9 @@ const OpenAIStreamState = struct {
     }
 
     fn parseSseToStreamDelta(self: *OpenAIStreamState, sse: sse_parser_mod.SseEvent) ?types.StreamDelta {
-        // [DONE] signals end of stream — clean up immediately
+        // [DONE] signals end of stream
         if (std.mem.eql(u8, sse.data, "[DONE]")) {
-            self.cleanup();
+            self.done = true;
             return null;
         }
 
@@ -216,22 +223,13 @@ const OpenAIStreamState = struct {
             return .{ .@"type" = .text_delta, .text = text };
         }
 
-        // finish_reason means message_stop — clean up now so the next
-        // nextDelta() call sees done=true and returns null safely.
+        // finish_reason means message_stop
         if (choices.array.items[0].object.get("finish_reason")) |_| {
-            self.cleanup();
+            self.done = true;
             return .{ .@"type" = .message_stop };
         }
 
         return null;
-    }
-
-    fn cleanup(self: *OpenAIStreamState) void {
-        self.done = true;
-        self.parser.deinit();
-        self.response.close();
-        self.http.deinit();
-        self.allocator.destroy(self);
     }
 };
 

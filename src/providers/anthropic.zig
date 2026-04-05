@@ -148,12 +148,24 @@ const AnthropicStreamState = struct {
     url: []const u8,
     body: []const u8,
     done: bool = false,
+    cleaned: bool = false,
 
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *AnthropicStreamState = @ptrCast(@alignCast(ctx));
+
+        // Stream already ended — release resources on the FIRST post-done call,
+        // then return null on all subsequent calls without touching self.
         if (self.done) {
-            // Already cleaned up on the previous terminal call.
-            // Do NOT call cleanup() again — self may already be destroyed.
+            if (!self.cleaned) {
+                self.cleaned = true;
+                self.parser.deinit();
+                self.response.close();
+                self.http.deinit();
+                self.allocator.free(self.url);
+                self.allocator.free(self.body);
+                // NOTE: do NOT destroy(self) here — the caller (query loop)
+                // may call nextDelta once more before destroying the iterator.
+            }
             return null;
         }
 
@@ -162,17 +174,17 @@ const AnthropicStreamState = struct {
 
         // 2. Read ONE chunk from the HTTP response
         const n = self.response.readChunk(&self.read_buf) catch {
-            self.cleanup();
+            self.done = true;
             return null;
         };
         if (n == 0) {
-            self.cleanup();
+            self.done = true;
             return null;
         }
 
         // 3. Feed to parser and try to extract an event
         self.parser.feed(self.read_buf[0..n]) catch {
-            self.cleanup();
+            self.done = true;
             return null;
         };
 
@@ -189,29 +201,12 @@ const AnthropicStreamState = struct {
             defer if (sse_event.id) |i| self.allocator.free(i);
             if (parseSseToStreamDelta(self.allocator, sse_event)) |delta| {
                 if (delta.@"type" == .message_stop) {
-                    // Stream is complete — clean up now so the next nextDelta()
-                    // call just sees done=true and returns null without touching
-                    // freed memory. cleanup() sets done=true before destroy(self).
-                    self.cleanup();
+                    self.done = true;
                 }
                 return delta;
             }
         }
         return null;
-    }
-
-    /// Release all resources and free self.
-    /// Sets done=true FIRST so that if nextDelta is called again on a stale
-    /// pointer (before the allocator reuses the memory), it returns null
-    /// without touching any freed resources.
-    fn cleanup(self: *AnthropicStreamState) void {
-        self.done = true;
-        self.parser.deinit();
-        self.response.close();
-        self.http.deinit();
-        self.allocator.free(self.url);
-        self.allocator.free(self.body);
-        self.allocator.destroy(self);
     }
 
     fn parseSseToStreamDelta(allocator: std.mem.Allocator, sse: sse_parser_mod.SseEvent) ?types.StreamDelta {
