@@ -168,25 +168,29 @@ const AnthropicStreamState = struct {
         // 1. Drain any buffered SSE events from previous reads
         if (self.drainParsedEvent()) |delta| return delta;
 
-        // 2. Read ONE chunk from the HTTP response
-        const n = self.response.readChunk(&self.read_buf) catch |err| {
-            std.debug.print("[http-stream] readChunk error: {s}\n", .{@errorName(err)});
-            self.done = true;
-            return null;
-        };
-        if (n == 0) {
-            std.debug.print("[http-stream] readChunk returned 0 (EOF)\n", .{});
-            self.done = true;
-            return null;
+        // 2. Read chunks in a loop until we get a parseable SSE event or EOF.
+        // Some providers send data in small fragments that don't form a complete
+        // SSE event (no \n\n terminator yet). Keep reading until we can parse one.
+        while (true) {
+            const n = self.response.readChunk(&self.read_buf) catch |err| {
+                std.debug.print("[http-stream] readChunk error: {s}\n", .{@errorName(err)});
+                self.done = true;
+                return null;
+            };
+            if (n == 0) {
+                std.debug.print("[http-stream] readChunk returned 0 (EOF)\n", .{});
+                self.done = true;
+                return null;
+            }
+
+            self.parser.feed(self.read_buf[0..n]) catch {
+                self.done = true;
+                return null;
+            };
+
+            if (self.drainParsedEvent()) |delta| return delta;
+            // No complete event yet — read more data
         }
-
-        // 3. Feed to parser and try to extract an event
-        self.parser.feed(self.read_buf[0..n]) catch {
-            self.done = true;
-            return null;
-        };
-
-        return self.drainParsedEvent();
     }
 
     /// Try to pull the next recognized event from the SSE parser.
