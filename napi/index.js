@@ -70,7 +70,7 @@ export function createQueryEngine(config) {
     config.systemPrompt ?? "",
     config.maxTurns ?? 50,
     config.cwd ?? ".",
-    config.maxOutputTokens ?? 200000,
+    config.maxOutputTokens ?? 16384,
   );
 }
 

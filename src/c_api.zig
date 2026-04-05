@@ -121,7 +121,7 @@ export fn agent_create_engine(
         .context_strategy = strategy_ptr,
         .system_prompt = system_prompt,
         .max_turns = if (max_turns > 0) max_turns else 50,
-        .max_output_tokens = if (max_output_tokens > 0) max_output_tokens else 200_000,
+        .max_output_tokens = if (max_output_tokens > 0) max_output_tokens else 16_384,
     });
     return @ptrCast(engine);
 }

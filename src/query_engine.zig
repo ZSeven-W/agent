@@ -36,7 +36,7 @@ pub const QueryEngine = struct {
         context_strategy: *context_mod.ContextStrategy,
         system_prompt: ?[]const u8 = null,
         max_turns: u32 = 50,
-        max_output_tokens: u32 = 200_000,
+        max_output_tokens: u32 = 16_384,
         max_budget_usd: ?f64 = null,
         session_path: ?[]const u8 = null,
     };

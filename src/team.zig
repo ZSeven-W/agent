@@ -24,7 +24,7 @@ pub const TeamMemberConfig = struct {
     tools: *tools_reg.ToolRegistry,
     system_prompt: ?[]const u8 = null,
     max_turns: u32 = 20,
-    max_output_tokens: u32 = 200_000,
+    max_output_tokens: u32 = 16_384,
 };
 
 pub const TeamConfig = struct {

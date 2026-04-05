@@ -52,7 +52,7 @@ pub const QueryParams = struct {
     file_cache: *file_cache_mod.FileStateCache,
     system_prompt: ?[]const u8 = null,
     max_turns: u32 = 50,
-    max_output_tokens: u32 = 200_000,
+    max_output_tokens: u32 = 16_384,
     max_budget_usd: ?f64 = null,
     external_queue: ?*etq_mod.ExternalToolQueue = null,
 };

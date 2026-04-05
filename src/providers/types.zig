@@ -8,7 +8,7 @@ pub const JsonValue = json_mod.JsonValue;
 pub const StreamDelta = streaming_events.StreamDelta;
 
 pub const StreamConfig = struct {
-    max_tokens: u32 = 200_000,
+    max_tokens: u32 = 16_384,
     system_prompt: ?[]const u8 = null,
     temperature: ?f32 = null,
     thinking: ?ThinkingConfig = null,
