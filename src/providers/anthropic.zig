@@ -152,7 +152,8 @@ const AnthropicStreamState = struct {
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *AnthropicStreamState = @ptrCast(@alignCast(ctx));
         if (self.done) {
-            self.cleanup();
+            // Already cleaned up on the previous terminal call.
+            // Do NOT call cleanup() again — self may already be destroyed.
             return null;
         }
 
@@ -187,10 +188,11 @@ const AnthropicStreamState = struct {
             defer if (sse_event.event) |e| self.allocator.free(e);
             defer if (sse_event.id) |i| self.allocator.free(i);
             if (parseSseToStreamDelta(self.allocator, sse_event)) |delta| {
-                // After message_stop, server may keep connection alive —
-                // mark done so we never call readChunk again.
                 if (delta.@"type" == .message_stop) {
-                    self.done = true;
+                    // Stream is complete — clean up now so the next nextDelta()
+                    // call just sees done=true and returns null without touching
+                    // freed memory. cleanup() sets done=true before destroy(self).
+                    self.cleanup();
                 }
                 return delta;
             }
@@ -198,6 +200,10 @@ const AnthropicStreamState = struct {
         return null;
     }
 
+    /// Release all resources and free self.
+    /// Sets done=true FIRST so that if nextDelta is called again on a stale
+    /// pointer (before the allocator reuses the memory), it returns null
+    /// without touching any freed resources.
     fn cleanup(self: *AnthropicStreamState) void {
         self.done = true;
         self.parser.deinit();

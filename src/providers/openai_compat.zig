@@ -169,7 +169,7 @@ const OpenAIStreamState = struct {
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *OpenAIStreamState = @ptrCast(@alignCast(ctx));
         if (self.done) {
-            self.cleanup();
+            // Already cleaned up — do NOT touch self further.
             return null;
         }
 
@@ -197,9 +197,9 @@ const OpenAIStreamState = struct {
     }
 
     fn parseSseToStreamDelta(self: *OpenAIStreamState, sse: sse_parser_mod.SseEvent) ?types.StreamDelta {
-        // [DONE] signals end of stream
+        // [DONE] signals end of stream — clean up immediately
         if (std.mem.eql(u8, sse.data, "[DONE]")) {
-            self.done = true;
+            self.cleanup();
             return null;
         }
 
@@ -216,9 +216,10 @@ const OpenAIStreamState = struct {
             return .{ .@"type" = .text_delta, .text = text };
         }
 
-        // finish_reason means message_stop
+        // finish_reason means message_stop — clean up now so the next
+        // nextDelta() call sees done=true and returns null safely.
         if (choices.array.items[0].object.get("finish_reason")) |_| {
-            self.done = true;
+            self.cleanup();
             return .{ .@"type" = .message_stop };
         }
 
@@ -226,6 +227,7 @@ const OpenAIStreamState = struct {
     }
 
     fn cleanup(self: *OpenAIStreamState) void {
+        self.done = true;
         self.parser.deinit();
         self.response.close();
         self.http.deinit();
