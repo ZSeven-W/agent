@@ -172,10 +172,12 @@ const OpenAIStreamState = struct {
 
         if (self.done) {
             if (!self.cleaned) {
+                const alloc = self.allocator;
                 self.cleaned = true;
                 self.parser.deinit();
                 self.response.close();
                 self.http.deinit();
+                alloc.destroy(self);
             }
             return null;
         }
