@@ -153,20 +153,14 @@ const AnthropicStreamState = struct {
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *AnthropicStreamState = @ptrCast(@alignCast(ctx));
 
-        // Stream already ended — release resources on the FIRST post-done call,
-        // then return null on all subsequent calls.
+        // Stream already ended — release HTTP/parser resources once,
+        // keep struct alive so subsequent calls are safe (no use-after-free).
         if (self.done) {
             if (!self.cleaned) {
-                // Save allocator on stack before any cleanup — self will be
-                // freed by destroy() at the end of this block.
-                const alloc = self.allocator;
                 self.cleaned = true;
                 self.parser.deinit();
                 self.response.close();
                 self.http.deinit();
-                alloc.free(self.url);
-                alloc.free(self.body);
-                alloc.destroy(self);
             }
             return null;
         }
