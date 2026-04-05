@@ -79,9 +79,9 @@ export async function submitMessage(engine, prompt) {
 }
 
 // nextEvent: returns native NAPI Promise (async work on background thread).
-// Wrap with a 120s timeout to prevent hanging on dropped provider connections.
+// Wrap with a 30s timeout — if no SSE event arrives within 30s, treat as stream end.
 const _nextEvent = addon.nextEvent;
-const NEXT_EVENT_TIMEOUT_MS = 120_000;
+const NEXT_EVENT_TIMEOUT_MS = 30_000;
 export function nextEvent(iter) {
   return Promise.race([
     _nextEvent(iter),
