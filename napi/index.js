@@ -79,16 +79,9 @@ export async function submitMessage(engine, prompt) {
 }
 
 // nextEvent: returns native NAPI Promise (async work on background thread).
-// Wrap with a 30s timeout — if no SSE event arrives within 30s, treat as stream end.
-const _nextEvent = addon.nextEvent;
-const NEXT_EVENT_TIMEOUT_MS = 30_000;
-export function nextEvent(iter) {
-  return Promise.race([
-    _nextEvent(iter),
-    new Promise((resolve) =>
-      setTimeout(() => resolve(null), NEXT_EVENT_TIMEOUT_MS),
-    ),
-  ]);
-}
+// No timeout wrapper — nextEvent blocks both during HTTP streaming AND while
+// waiting for external tool results (which can take minutes for orchestration).
+// The SSE ping keep-alive in chat.ts prevents Bun's idle timeout.
+export const nextEvent = addon.nextEvent;
 
 export default addon;
