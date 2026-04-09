@@ -141,13 +141,31 @@ pub const HttpClient = struct {
         };
         std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
 
-        // For error responses, log status and request body preview.
-        // Do NOT read response body — response.reader() panics on some
-        // providers that send error responses without proper transfer encoding.
-        if (response.head.status != .ok) {
-            if (body_preview_len > 0) {
-                std.debug.print("[http] request body ({d} bytes): {s}\n", .{ body_total_len, body_preview[0..body_preview_len] });
-            }
+        // Request-body preview logging is gated behind a runtime env
+        // variable so prompt payloads (user input, conversation
+        // history, API context) are NEVER emitted to stderr on
+        // normal shipped builds. Set `OPENPENCIL_HTTP_LOG_REQUEST_BODY=1`
+        // in the process environment to opt in when diagnosing a
+        // silent provider-edge reject (200 OK followed by an
+        // immediately-closed stream — the empty-response bug).
+        //
+        // Error responses (non-200) still get the body preview
+        // unconditionally: those are already fail cases, the payload
+        // is being thrown away by the caller, and the diagnostic is
+        // high-value for debugging 4xx/5xx from providers with
+        // non-standard framing.
+        //
+        // Do NOT read the response body — response.reader() panics
+        // on some providers that send responses without proper
+        // transfer encoding.
+        const log_body_enabled = blk: {
+            const env = std.posix.getenv("OPENPENCIL_HTTP_LOG_REQUEST_BODY") orelse break :blk false;
+            break :blk env.len > 0 and env[0] != '0';
+        };
+        const should_log_body =
+            body_preview_len > 0 and (log_body_enabled or response.head.status != .ok);
+        if (should_log_body) {
+            std.debug.print("[http] request body ({d} bytes): {s}\n", .{ body_total_len, body_preview[0..body_preview_len] });
         }
 
         return .{
