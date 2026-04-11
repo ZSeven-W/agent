@@ -173,20 +173,27 @@ pub const QueryLoopIterator = struct {
         if (has_text) block_count += 1;
         if (has_tools) block_count += self.tool_exec.?.tracked.items.len;
 
-        const content = self.params.allocator.alloc(message_mod.ContentBlock, block_count) catch return;
+        // Allocate through the message store's arena so text / block ids /
+        // content slice are all freed together with the store on engine.deinit.
+        const msg_alloc = self.state.messages.allocator();
+        const content = msg_alloc.alloc(message_mod.ContentBlock, block_count) catch return;
         var idx: usize = 0;
 
         if (has_text) {
-            const text_copy = self.params.allocator.dupe(u8, self.text_buf.items) catch return;
+            const text_copy = msg_alloc.dupe(u8, self.text_buf.items) catch return;
             content[idx] = .{ .text = text_copy };
             idx += 1;
         }
 
         if (has_tools) {
             for (self.tool_exec.?.tracked.items) |tracked| {
+                // Dupe tracked ids into the store — the streaming iterator
+                // that sourced these bytes may be torn down before deinit.
+                const id_copy = msg_alloc.dupe(u8, tracked.block.id) catch return;
+                const name_copy = msg_alloc.dupe(u8, tracked.block.name) catch return;
                 content[idx] = .{ .tool_use = .{
-                    .id = tracked.block.id,
-                    .name = tracked.block.name,
+                    .id = id_copy,
+                    .name = name_copy,
                     .input = tracked.block.input,
                 } };
                 idx += 1;
@@ -246,23 +253,31 @@ pub const QueryLoopIterator = struct {
 
                 self.state.turn_count += 1;
 
-                // Convert MessageStore to ApiMessages (preserving tool_use / tool_result blocks)
+                // Convert MessageStore to ApiMessages (preserving tool_use / tool_result blocks).
+                // Everything allocated for the api-message view — the slice itself and the
+                // ObjectMap / Array / JsonValue chain inside each .content — is freed by the
+                // turn arena below. Providers consume `api_messages` synchronously inside
+                // stream_text (serializing to an HTTP body or ignoring it), so deinit'ing at
+                // the end of this block is safe.
+                var turn_arena = std.heap.ArenaAllocator.init(self.params.allocator);
+                defer turn_arena.deinit();
+                const turn_alloc = turn_arena.allocator();
+
                 var api_messages: std.ArrayList(providers_types.ApiMessage) = .{};
-                defer api_messages.deinit(self.params.allocator);
 
                 const messages_slice = self.state.messages.items();
                 for (messages_slice) |msg| {
                     switch (msg) {
                         .user => |u| {
-                            const content = contentBlocksToJson(self.params.allocator, u.content) catch json_mod.JsonValue{ .string = "" };
-                            api_messages.append(self.params.allocator, .{
+                            const content = contentBlocksToJson(turn_alloc, u.content) catch json_mod.JsonValue{ .string = "" };
+                            api_messages.append(turn_alloc, .{
                                 .role = "user",
                                 .content = content,
                             }) catch {};
                         },
                         .assistant => |a| {
-                            const content = contentBlocksToJson(self.params.allocator, a.content) catch json_mod.JsonValue{ .string = "" };
-                            api_messages.append(self.params.allocator, .{
+                            const content = contentBlocksToJson(turn_alloc, a.content) catch json_mod.JsonValue{ .string = "" };
+                            api_messages.append(turn_alloc, .{
                                 .role = "assistant",
                                 .content = content,
                             }) catch {};
@@ -531,16 +546,18 @@ pub const QueryLoopIterator = struct {
             .tool_collecting => {
                 var exec = &self.tool_exec.?;
 
+                const msg_alloc = self.state.messages.allocator();
                 while (exec.nextCompleted()) |completed| {
+                    const id_copy = msg_alloc.dupe(u8, completed.block.id) catch continue;
                     const result_block = message_mod.ContentBlock{
                         .tool_result = .{
-                            .tool_use_id = completed.block.id,
+                            .tool_use_id = id_copy,
                             .content = if (completed.result) |r| r.data else .{ .string = completed.error_message orelse "unknown error" },
                             .is_error = completed.error_message != null,
                         },
                     };
 
-                    const content = self.params.allocator.alloc(message_mod.ContentBlock, 1) catch continue;
+                    const content = msg_alloc.alloc(message_mod.ContentBlock, 1) catch continue;
                     content[0] = result_block;
                     self.state.messages.append(.{ .user = .{
                         .header = message_mod.Header.init(),

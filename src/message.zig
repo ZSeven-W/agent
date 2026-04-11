@@ -170,26 +170,35 @@ pub const Message = union(enum) {
 
 /// An ordered, append-only store for `Message` values.
 ///
-/// Backed by `std.ArrayListUnmanaged`; the allocator is kept on the struct so
-/// callers do not need to thread it through every call.
+/// Backed by an arena so every string / slice referenced from stored messages
+/// is freed in one shot on `deinit`. Callers must allocate message `content`
+/// slices and their inner strings through `allocator()` (or dupe borrowed data
+/// into it) — anything else risks use-after-free on deinit.
 pub const MessageStore = struct {
-    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
     messages: std.ArrayListUnmanaged(Message),
 
-    pub fn init(allocator: std.mem.Allocator) MessageStore {
+    pub fn init(gpa: std.mem.Allocator) MessageStore {
         return .{
-            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(gpa),
             .messages = .{},
         };
     }
 
     pub fn deinit(self: *MessageStore) void {
-        self.messages.deinit(self.allocator);
+        self.messages.deinit(self.arena.child_allocator);
+        self.arena.deinit();
+    }
+
+    /// Allocator whose lifetime matches the store — use this for any
+    /// content/string owned by a stored message.
+    pub fn allocator(self: *MessageStore) std.mem.Allocator {
+        return self.arena.allocator();
     }
 
     /// Append a message to the store.
     pub fn append(self: *MessageStore, msg: Message) !void {
-        try self.messages.append(self.allocator, msg);
+        try self.messages.append(self.arena.child_allocator, msg);
     }
 
     /// Return the number of messages currently held.

@@ -67,6 +67,8 @@ pub const QueryEngine = struct {
     fn freeCurrentLoop(self: *QueryEngine) void {
         if (self.current_loop) |loop| {
             if (loop.tool_exec) |*exec| exec.deinit();
+            loop.text_buf.deinit(self.allocator);
+            loop.tool_json_buf.deinit(self.allocator);
             self.allocator.destroy(loop);
             self.current_loop = null;
         }
@@ -78,10 +80,13 @@ pub const QueryEngine = struct {
         // Free any previous loop before starting a new one.
         self.freeCurrentLoop();
 
-        // Heap-allocate the content slice — &.{...} creates a stack temporary that
-        // becomes dangling after this function returns.
-        const content = self.allocator.alloc(message_mod.ContentBlock, 1) catch return streaming.EventIterator{ .context = undefined, .nextFn = undefined };
-        content[0] = .{ .text = prompt };
+        // Own every byte that will live in the message store — MessageStore
+        // frees its entire arena on deinit, so borrowing `prompt` directly
+        // would double-free the caller's memory.
+        const msg_alloc = self.messages.allocator();
+        const prompt_dupe = msg_alloc.dupe(u8, prompt) catch return streaming.EventIterator{ .context = undefined, .nextFn = undefined };
+        const content = msg_alloc.alloc(message_mod.ContentBlock, 1) catch return streaming.EventIterator{ .context = undefined, .nextFn = undefined };
+        content[0] = .{ .text = prompt_dupe };
         const user_msg = message_mod.Message{ .user = .{
             .header = message_mod.Header.init(),
             .content = content,
@@ -158,9 +163,11 @@ pub const QueryEngine = struct {
                 else => continue,
             };
 
-            // Allocate content slice that outlives the parsed JSON
-            const content_dupe = try self.allocator.dupe(u8, content_str);
-            const content_slice = try self.allocator.alloc(message_mod.ContentBlock, 1);
+            // Allocate content slice through the message store's arena so it
+            // is freed uniformly with every other stored message.
+            const msg_alloc = self.messages.allocator();
+            const content_dupe = try msg_alloc.dupe(u8, content_str);
+            const content_slice = try msg_alloc.alloc(message_mod.ContentBlock, 1);
             content_slice[0] = .{ .text = content_dupe };
 
             if (std.mem.eql(u8, role_str, "user")) {
