@@ -33,10 +33,15 @@ jobs:
             runner: ubuntu-latest
             zig_target: x86_64-linux
             native: true
-          # windows-x64 is intentionally omitted: NAPI on Windows needs a
-          # delay-load stub (node.lib / /DELAYLOAD:node.exe) to satisfy the
-          # napi_* symbols at link time, which requires more build.zig
-          # plumbing than we have here. Re-add once that's in place.
+          - os: windows
+            arch: x64
+            # Cross-compile from linux — avoids MSVC toolchain detection on
+            # windows-latest and gives an identical build host to the linux
+            # matrix entry. The import lib for napi_* comes from
+            # napi/node_api.def via `zig dlltool` (see build.zig).
+            runner: ubuntu-latest
+            zig_target: x86_64-windows
+            native: false
     steps:
       - uses: actions/checkout@v4
 

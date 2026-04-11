@@ -43,7 +43,12 @@ jobs:
             arch: x64
             runner: ubuntu-latest
             zig_target: x86_64-linux
-          # windows-x64: see release.yml for why it is omitted.
+          - os: windows
+            arch: x64
+            # Cross-compile from linux — napi_* imports come from
+            # napi/node_api.def via `zig dlltool` (see build.zig).
+            runner: ubuntu-latest
+            zig_target: x86_64-windows
     steps:
       - uses: actions/checkout@v4
 
