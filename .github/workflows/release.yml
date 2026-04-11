@@ -31,7 +31,10 @@ jobs:
           - os: linux
             arch: x64
             runner: ubuntu-latest
-            zig_target: x86_64-linux
+            # Pin glibc ≥ 2.17 so Zig emits a portable SONAME (`libc.so.6`)
+            # instead of hard-coding the runner's absolute libc path (which
+            # on Debian/Ubuntu is a linker script, breaking Node's dlopen).
+            zig_target: x86_64-linux-gnu.2.17
             native: true
           - os: windows
             arch: x64

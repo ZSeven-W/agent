@@ -42,7 +42,8 @@ jobs:
           - os: linux
             arch: x64
             runner: ubuntu-latest
-            zig_target: x86_64-linux
+            # See release.yml for why we pin glibc 2.17 here.
+            zig_target: x86_64-linux-gnu.2.17
           - os: windows
             arch: x64
             # Cross-compile from linux — napi_* imports come from
