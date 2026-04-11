@@ -18,22 +18,28 @@ pub const BackendRegistry = struct {
     pub fn detect(self: *BackendRegistry) BackendType {
         if (self.cached) |c| return c;
 
-        // iTerm2 — highest priority.
-        if (std.posix.getenv("ITERM_SESSION_ID") != null) {
-            self.cached = .iterm2;
-            return .iterm2;
-        }
+        // Terminal multiplexer backends (iTerm2, tmux) only exist on
+        // Unix-like hosts. std.posix.getenv is also a compile error on
+        // Windows (env strings are WTF-16), so gate the whole lookup behind
+        // a comptime OS check.
+        if (comptime @import("builtin").os.tag != .windows) {
+            // iTerm2 — highest priority.
+            if (std.posix.getenv("ITERM_SESSION_ID") != null) {
+                self.cached = .iterm2;
+                return .iterm2;
+            }
 
-        // tmux — check env variable first.
-        if (std.posix.getenv("TMUX") != null) {
-            self.cached = .tmux;
-            return .tmux;
-        }
+            // tmux — check env variable first.
+            if (std.posix.getenv("TMUX") != null) {
+                self.cached = .tmux;
+                return .tmux;
+            }
 
-        // tmux — check if binary is on PATH.
-        if (tmuxBinaryExists()) {
-            self.cached = .tmux;
-            return .tmux;
+            // tmux — check if binary is on PATH.
+            if (tmuxBinaryExists()) {
+                self.cached = .tmux;
+                return .tmux;
+            }
         }
 
         // Fallback — always available.

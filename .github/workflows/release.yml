@@ -19,15 +19,24 @@ jobs:
           - os: macos
             arch: arm64
             runner: macos-14
+            zig_target: aarch64-macos
+            native: true
           - os: macos
             arch: x64
-            runner: macos-13
+            # macos-13 runners are retired — cross-compile from the arm64
+            # runner; zig's cross toolchain handles the Mach-O x64 target.
+            runner: macos-14
+            zig_target: x86_64-macos
+            native: false
           - os: linux
             arch: x64
             runner: ubuntu-latest
-          - os: windows
-            arch: x64
-            runner: windows-latest
+            zig_target: x86_64-linux
+            native: true
+          # windows-x64 is intentionally omitted: NAPI on Windows needs a
+          # delay-load stub (node.lib / /DELAYLOAD:node.exe) to satisfy the
+          # napi_* symbols at link time, which requires more build.zig
+          # plumbing than we have here. Re-add once that's in place.
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +46,11 @@ jobs:
           version: 0.15.2
 
       - name: Run tests
+        if: matrix.native
         run: zig build test
 
       - name: Build NAPI addon
-        run: zig build napi -Doptimize=ReleaseFast
+        run: zig build napi -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
 
       - name: Rename artifact
         shell: bash

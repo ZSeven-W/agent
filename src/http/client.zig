@@ -158,8 +158,12 @@ pub const HttpClient = struct {
         // Do NOT read the response body — response.reader() panics
         // on some providers that send responses without proper
         // transfer encoding.
+        // std.posix.getenv is a compile error on Windows (env strings are
+        // WTF-16); use getEnvVarOwned instead and skip the opt-in on hosts
+        // that can't satisfy the lookup.
         const log_body_enabled = blk: {
-            const env = std.posix.getenv("OPENPENCIL_HTTP_LOG_REQUEST_BODY") orelse break :blk false;
+            const env = std.process.getEnvVarOwned(self.allocator, "OPENPENCIL_HTTP_LOG_REQUEST_BODY") catch break :blk false;
+            defer self.allocator.free(env);
             break :blk env.len > 0 and env[0] != '0';
         };
         const should_log_body =

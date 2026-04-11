@@ -34,15 +34,16 @@ jobs:
           - os: macos
             arch: arm64
             runner: macos-14
+            zig_target: aarch64-macos
           - os: macos
             arch: x64
-            runner: macos-13
+            runner: macos-14 # cross-compile from arm64; macos-13 is retired
+            zig_target: x86_64-macos
           - os: linux
             arch: x64
             runner: ubuntu-latest
-          - os: windows
-            arch: x64
-            runner: windows-latest
+            zig_target: x86_64-linux
+          # windows-x64: see release.yml for why it is omitted.
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +53,7 @@ jobs:
           version: 0.15.2
 
       - name: Build NAPI addon
-        run: zig build napi -Doptimize=ReleaseFast
+        run: zig build napi -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

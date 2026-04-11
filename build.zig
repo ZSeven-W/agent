@@ -39,6 +39,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     c_api_static_module.link_libc = true;
+    // std.net on Windows pulls in Winsock — link ws2_32 so WSASend/WSARecv/
+    // WSAGetOverlappedResult resolve at link time instead of failing at load.
+    if (target.result.os.tag == .windows) {
+        c_api_static_module.linkSystemLibrary("ws2_32", .{});
+    }
     const static_lib = b.addLibrary(.{
         .name = "agent_static",
         .root_module = c_api_static_module,
@@ -51,6 +56,9 @@ pub fn build(b: *std.Build) void {
     });
     bridge_module.linkLibrary(static_lib);
     bridge_module.link_libc = true;
+    if (target.result.os.tag == .windows) {
+        bridge_module.linkSystemLibrary("ws2_32", .{});
+    }
     const napi_lib = b.addLibrary(.{
         .name = "agent_napi",
         .root_module = bridge_module,
