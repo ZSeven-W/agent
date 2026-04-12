@@ -69,9 +69,14 @@ pub fn queryLoop(params: QueryParams, initial_messages: *message_mod.MessageStor
     };
 }
 
+/// Maximum characters for a single tool_result content string.
+/// Larger results are truncated to prevent context bloat (similar to
+/// Claude Code's microcompact strategy of clearing old tool results).
+const TOOL_RESULT_MAX_CHARS: usize = 4000;
+
 /// Convert ContentBlock slice to a JsonValue suitable for the API.
 /// If the slice has a single text block, return a plain string.
-/// Otherwise return a JSON array with typed objects (text, tool_use, tool_result).
+/// Otherwise return a JSON array with typed objects (text, thinking, tool_use, tool_result).
 fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod.ContentBlock) !json_mod.JsonValue {
     // Fast path: single text block → plain string
     if (blocks.len == 1) {
@@ -91,6 +96,15 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
                 try obj.put("text", .{ .string = t });
                 try arr.append(.{ .object = obj });
             },
+            .thinking => |tb| {
+                // Echo thinking blocks back to preserve the reasoning chain.
+                // MiniMax docs confirm: "将完整的 response.content（包含
+                // thinking/text/tool_use 等所有块）添加到消息历史"
+                var obj = std.json.ObjectMap.init(allocator);
+                try obj.put("type", .{ .string = "thinking" });
+                try obj.put("thinking", .{ .string = tb.thinking });
+                try arr.append(.{ .object = obj });
+            },
             .tool_use => |tu| {
                 var obj = std.json.ObjectMap.init(allocator);
                 try obj.put("type", .{ .string = "tool_use" });
@@ -104,15 +118,23 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
                 try obj.put("type", .{ .string = "tool_result" });
                 try obj.put("tool_use_id", .{ .string = tr.tool_use_id });
                 // Anthropic API requires content to be a string, not a JSON object
-                const content_val: json_mod.JsonValue = switch (tr.content) {
+                const raw_val: json_mod.JsonValue = switch (tr.content) {
                     .string => tr.content,
                     else => .{ .string = json_mod.stringify(allocator, tr.content) catch "" },
                 };
+                // Truncate oversized tool results to prevent context overflow
+                const content_val: json_mod.JsonValue = if (raw_val == .string and raw_val.string.len > TOOL_RESULT_MAX_CHARS) blk: {
+                    const truncated = std.fmt.allocPrint(
+                        allocator,
+                        "{s}...[truncated, {d} chars total]",
+                        .{ raw_val.string[0..TOOL_RESULT_MAX_CHARS], raw_val.string.len },
+                    ) catch raw_val.string;
+                    break :blk .{ .string = truncated };
+                } else raw_val;
                 try obj.put("content", content_val);
                 if (tr.is_error) try obj.put("is_error", .{ .bool = true });
                 try arr.append(.{ .object = obj });
             },
-            .thinking => {},
             .image => {},
         }
     }
@@ -136,6 +158,8 @@ pub const QueryLoopIterator = struct {
     tool_json_buf: std.ArrayListUnmanaged(u8) = .{},
     // Accumulates text_delta fragments for the assistant message
     text_buf: std.ArrayListUnmanaged(u8) = .{},
+    // Accumulates thinking_delta fragments for the assistant message
+    thinking_buf: std.ArrayListUnmanaged(u8) = .{},
 
     const Phase = enum {
         start,
@@ -162,14 +186,16 @@ pub const QueryLoopIterator = struct {
         self.tool_json_buf.clearRetainingCapacity();
     }
 
-    /// Store the accumulated assistant message (text + tool_use blocks) in the message store.
+    /// Store the accumulated assistant message (thinking + text + tool_use blocks) in the message store.
     fn storeAssistantMessage(self: *QueryLoopIterator) void {
+        const has_thinking = self.thinking_buf.items.len > 0;
         const has_text = self.text_buf.items.len > 0;
         const has_tools = self.tool_exec != null and self.tool_exec.?.tracked.items.len > 0;
-        if (!has_text and !has_tools) return;
+        if (!has_thinking and !has_text and !has_tools) return;
 
         // Count content blocks needed
         var block_count: usize = 0;
+        if (has_thinking) block_count += 1;
         if (has_text) block_count += 1;
         if (has_tools) block_count += self.tool_exec.?.tracked.items.len;
 
@@ -178,6 +204,15 @@ pub const QueryLoopIterator = struct {
         const msg_alloc = self.state.messages.allocator();
         const content = msg_alloc.alloc(message_mod.ContentBlock, block_count) catch return;
         var idx: usize = 0;
+
+        // Thinking blocks MUST come before text (Anthropic API ordering).
+        // Omitting these causes 400 errors with providers that emit thinking
+        // (MiniMax, DeepSeek, etc.) because the conversation history is invalid.
+        if (has_thinking) {
+            const thinking_copy = msg_alloc.dupe(u8, self.thinking_buf.items) catch return;
+            content[idx] = .{ .thinking = .{ .thinking = thinking_copy } };
+            idx += 1;
+        }
 
         if (has_text) {
             const text_copy = msg_alloc.dupe(u8, self.text_buf.items) catch return;
@@ -205,6 +240,7 @@ pub const QueryLoopIterator = struct {
             .content = content,
         } }) catch {};
 
+        self.thinking_buf.clearRetainingCapacity();
         self.text_buf.clearRetainingCapacity();
     }
 
@@ -253,6 +289,13 @@ pub const QueryLoopIterator = struct {
 
                 self.state.turn_count += 1;
 
+                // Reset tool executor from previous turn so storeAssistantMessage
+                // only records tool_use blocks from THIS turn's assistant response.
+                if (self.tool_exec) |*exec| {
+                    exec.deinit();
+                    self.tool_exec = null;
+                }
+
                 // Convert MessageStore to ApiMessages (preserving tool_use / tool_result blocks).
                 // Everything allocated for the api-message view — the slice itself and the
                 // ObjectMap / Array / JsonValue chain inside each .content — is freed by the
@@ -285,6 +328,15 @@ pub const QueryLoopIterator = struct {
                         else => {},
                     }
                 }
+
+                // ── Microcompact: clear old tool results if context is too large ──
+                // Inspired by Claude Code's microcompact strategy: estimate total
+                // content size, and if it exceeds 80% of the provider's context
+                // window, clear old tool_result content from oldest to newest
+                // (keeping the most recent 2 tool results intact).
+                const max_ctx_tokens = self.params.provider.vtable.max_context_tokens;
+                const threshold_chars: usize = @as(usize, max_ctx_tokens) * 4 * 4 / 5; // 80% of max, 4 chars ≈ 1 token
+                microcompactMessages(turn_alloc, api_messages.items, threshold_chars);
 
                 // Build merged tool schemas from registry (executable + external).
                 // Use an arena so that both the slice and any inner JsonValue
@@ -344,6 +396,13 @@ pub const QueryLoopIterator = struct {
                                 .name = delta.tool_name.?,
                                 .input = .null,
                             }, uuid) catch {};
+                        }
+
+                        // Accumulate thinking for assistant message history
+                        if (delta.@"type" == .thinking_delta) {
+                            if (delta.text) |t| {
+                                self.thinking_buf.appendSlice(self.params.allocator, t) catch {};
+                            }
                         }
 
                         // Accumulate text for assistant message history
@@ -578,6 +637,105 @@ pub const QueryLoopIterator = struct {
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Microcompact — clear old tool results when context is too large
+// ---------------------------------------------------------------------------
+
+/// Estimate the character count of a JsonValue (rough, no full serialization).
+fn estimateJsonChars(val: json_mod.JsonValue) usize {
+    return switch (val) {
+        .string => |s| s.len + 2, // quotes
+        .integer => 8,
+        .float => 12,
+        .bool => 5,
+        .null => 4,
+        .array => |a| blk: {
+            var sum: usize = 2; // []
+            for (a.items) |item| sum += estimateJsonChars(item) + 1;
+            break :blk sum;
+        },
+        .object => |o| blk: {
+            var sum: usize = 2; // {}
+            var it = o.iterator();
+            while (it.next()) |entry| {
+                sum += entry.key_ptr.len + 4 + estimateJsonChars(entry.value_ptr.*);
+            }
+            break :blk sum;
+        },
+        .number_string => |s| s.len,
+    };
+}
+
+/// Clear old tool_result content when total context size exceeds threshold.
+/// Preserves message structure and keeps the most recent 2 tool results intact.
+/// This is modeled after Claude Code's microcompact strategy.
+fn microcompactMessages(
+    allocator: std.mem.Allocator,
+    messages: []providers_types.ApiMessage,
+    threshold_chars: usize,
+) void {
+    // Estimate total context size
+    var total_chars: usize = 0;
+    for (messages) |msg| {
+        total_chars += msg.role.len + estimateJsonChars(msg.content);
+    }
+
+    if (total_chars <= threshold_chars) return;
+
+    std.debug.print(
+        "[agent-microcompact] context {d} chars exceeds threshold {d}, clearing old tool results\n",
+        .{ total_chars, threshold_chars },
+    );
+
+    // Find all tool_result content blocks (in user messages with array content)
+    // and clear from oldest to newest, keeping the last 2 intact.
+    const KEEP_RECENT: usize = 2;
+    const PosEntry = struct { msg_idx: usize, block_idx: usize, chars: usize };
+    const MAX_POSITIONS: usize = 64;
+    var positions_buf: [MAX_POSITIONS]PosEntry = undefined;
+    var count: usize = 0;
+
+    for (messages, 0..) |msg, mi| {
+        if (!std.mem.eql(u8, msg.role, "user")) continue;
+        if (msg.content != .array) continue;
+        for (msg.content.array.items, 0..) |item, bi| {
+            if (item != .object) continue;
+            const type_val = item.object.get("type") orelse continue;
+            if (type_val != .string) continue;
+            if (!std.mem.eql(u8, type_val.string, "tool_result")) continue;
+            const content_val = item.object.get("content") orelse continue;
+            const chars = estimateJsonChars(content_val);
+            if (count < MAX_POSITIONS) {
+                positions_buf[count] = .{ .msg_idx = mi, .block_idx = bi, .chars = chars };
+                count += 1;
+            }
+        }
+    }
+
+    if (count <= KEEP_RECENT) return;
+
+    // Clear old tool results (keep last KEEP_RECENT)
+    var freed: usize = 0;
+    for (positions_buf[0 .. count - KEEP_RECENT]) |pos| {
+        // Replace content with a compact placeholder
+        const placeholder = std.fmt.allocPrint(
+            allocator,
+            "[cleared \u{2014} {d} chars]",
+            .{pos.chars},
+        ) catch "[cleared]";
+        messages[pos.msg_idx].content.array.items[pos.block_idx].object.put(
+            "content",
+            json_mod.JsonValue{ .string = placeholder },
+        ) catch {};
+        freed += pos.chars;
+    }
+
+    std.debug.print(
+        "[agent-microcompact] cleared {d}/{d} tool results, freed ~{d} chars\n",
+        .{ count - KEEP_RECENT, count, freed },
+    );
+}
 
 test "queryLoop yields error on max_turns exceeded" {
     const allocator = std.testing.allocator;
