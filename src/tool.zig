@@ -278,3 +278,69 @@ test "Tool.call delegates to implementation" {
     try std.testing.expect(result.data == .null);
     try std.testing.expectEqual(@as(u32, 1), impl.call_count);
 }
+
+test "buildTool isConcurrencySafe defaults to false" {
+    var impl = TestTool{};
+    const tool = buildTool(TestTool, &impl);
+    try std.testing.expect(!tool.isConcurrencySafe(.null));
+}
+
+test "buildTool checkPermissions defaults to allow" {
+    var impl = TestTool{};
+    const tool = buildTool(TestTool, &impl);
+
+    var abort = abort_mod.AbortController{};
+    var cache = file_cache_mod.FileStateCache.init(std.testing.allocator, 10, 1024);
+    defer cache.deinit();
+    var msgs = message_mod.MessageStore.init(std.testing.allocator);
+    defer msgs.deinit();
+    var perm_ctx = perm.PermissionContext{};
+    var hooks = hook_mod.HookRunner.init(std.testing.allocator);
+    defer hooks.deinit();
+
+    var ctx = ToolUseContext{
+        .allocator = std.testing.allocator,
+        .cwd = "/tmp",
+        .abort_controller = &abort,
+        .file_cache = &cache,
+        .messages = &msgs,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+    };
+
+    const decision = tool.checkPermissions(.null, &ctx);
+    switch (decision) {
+        .allow => |a| {
+            try std.testing.expectEqual(@as(?json_mod.JsonValue, null), a.updated_input);
+        },
+        else => return error.UnexpectedDecision,
+    }
+}
+
+test "buildTool getDescription falls back to name" {
+    var impl = TestTool{};
+    const tool = buildTool(TestTool, &impl);
+    // TestTool has no `description` decl, so it should fall back to `name`
+    try std.testing.expectEqualStrings("TestTool", tool.getDescription());
+}
+
+const ConcurrentTool = struct {
+    pub const name = "ConcurrentTool";
+    pub const description = "A tool that supports concurrency";
+    pub const input_schema = JsonSchema{ .@"type" = "object" };
+
+    pub fn call(_: *ConcurrentTool, _: JsonValue, _: *ToolUseContext) ToolCallError!ToolResult {
+        return .{ .data = .null };
+    }
+
+    pub fn isConcurrencySafe(_: *ConcurrentTool, _: JsonValue) bool {
+        return true;
+    }
+};
+
+test "buildTool respects custom isConcurrencySafe and description" {
+    var impl = ConcurrentTool{};
+    const tool = buildTool(ConcurrentTool, &impl);
+    try std.testing.expect(tool.isConcurrencySafe(.null));
+    try std.testing.expectEqualStrings("A tool that supports concurrency", tool.getDescription());
+}

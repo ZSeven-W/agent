@@ -107,6 +107,41 @@ test "urlEndsWithVersion" {
     try std.testing.expect(!urlEndsWithVersion(""));
 }
 
+test "Provider getter methods via mock vtable" {
+    const mock_vtable = Provider.VTable{
+        .id = "test-provider",
+        .max_context_tokens = 50_000,
+        .supports_thinking = true,
+        .supports_tool_use = true,
+        .stream_text = undefined,
+    };
+    var dummy: u8 = 0;
+    const p = Provider{
+        .ptr = @ptrCast(&dummy),
+        .vtable = &mock_vtable,
+    };
+    try std.testing.expectEqualStrings("test-provider", p.getId());
+    try std.testing.expectEqual(@as(u32, 50_000), p.getMaxContextTokens());
+    try std.testing.expect(p.supportsThinking());
+}
+
+test "ProviderConfig defaults" {
+    const config = ProviderConfig{
+        .id = "test",
+        .model = "gpt-4",
+    };
+    try std.testing.expectEqual(@as(?[]const u8, null), config.api_key);
+    try std.testing.expectEqual(@as(?[]const u8, null), config.base_url);
+    try std.testing.expectEqual(@as(?u32, null), config.max_context_tokens);
+}
+
+test "StreamConfig defaults" {
+    const sc = StreamConfig{};
+    try std.testing.expectEqual(@as(u32, 16_384), sc.max_tokens);
+    try std.testing.expectEqual(@as(?[]const u8, null), sc.system_prompt);
+    try std.testing.expectEqual(@as(?f32, null), sc.temperature);
+}
+
 /// Iterates over stream chunks from a provider response.
 pub const StreamIterator = struct {
     context: *anyopaque,

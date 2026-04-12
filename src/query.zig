@@ -612,6 +612,284 @@ test "queryLoop yields error on max_turns exceeded" {
     try std.testing.expectEqualStrings("error_max_turns", event.result.subtype);
 }
 
+test "contentBlocksToJson single text block returns string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{.{ .text = "hello world" }};
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expectEqualStrings("hello world", result.string);
+}
+
+test "contentBlocksToJson empty blocks returns empty string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{};
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expectEqualStrings("", result.string);
+}
+
+test "contentBlocksToJson multiple blocks returns array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{
+        .{ .text = "I will read the file." },
+        .{ .tool_use = .{
+            .id = "toolu_123",
+            .name = "ReadFile",
+            .input = .null,
+        } },
+    };
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 2), result.array.items.len);
+
+    // First element: text block
+    const text_obj = result.array.items[0].object;
+    try std.testing.expectEqualStrings("text", json_mod.getString(.{ .object = text_obj }, "type").?);
+
+    // Second element: tool_use block
+    const tool_obj = result.array.items[1].object;
+    try std.testing.expectEqualStrings("tool_use", json_mod.getString(.{ .object = tool_obj }, "type").?);
+    try std.testing.expectEqualStrings("toolu_123", json_mod.getString(.{ .object = tool_obj }, "id").?);
+}
+
+test "contentBlocksToJson tool_result block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{
+        .{ .tool_result = .{
+            .tool_use_id = "toolu_456",
+            .content = .{ .string = "file contents here" },
+            .is_error = false,
+        } },
+        .{ .tool_result = .{
+            .tool_use_id = "toolu_789",
+            .content = .{ .string = "error: not found" },
+            .is_error = true,
+        } },
+    };
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 2), result.array.items.len);
+
+    // Check is_error on second result
+    const err_obj = result.array.items[1].object;
+    try std.testing.expect(json_mod.getBool(.{ .object = err_obj }, "is_error").?);
+}
+
+test "queryLoop streams text with MockProvider" {
+    const allocator = std.testing.allocator;
+    const testing_mod = @import("testing.zig");
+
+    const deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .text_delta, .text = "Hello" },
+        .{ .@"type" = .text_delta, .text = " World" },
+        .{ .@"type" = .message_stop },
+    };
+    var mock = testing_mod.MockProvider.init(allocator, &.{.{ .deltas = &deltas }});
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    defer msgs.deinit();
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var session = session_mod.Session.init(allocator);
+    defer session.deinit();
+    var perm_ctx = perm.PermissionContext{};
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    defer cache.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    // Seed a user message
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Hi" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+        .max_turns = 5,
+    }, &msgs);
+    defer {
+        if (loop_iter.tool_exec) |*exec| exec.deinit();
+        loop_iter.text_buf.deinit(allocator);
+        loop_iter.tool_json_buf.deinit(allocator);
+    }
+
+    var iter = loop_iter.toEventIterator();
+
+    // Collect events
+    var saw_text = false;
+    var saw_result = false;
+    while (iter.next()) |event| {
+        switch (event) {
+            .stream_event => |delta| {
+                if (delta.text != null) saw_text = true;
+            },
+            .result => |r| {
+                saw_result = true;
+                try std.testing.expect(!r.is_error);
+                try std.testing.expectEqualStrings("success", r.subtype);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_text);
+    try std.testing.expect(saw_result);
+}
+
+test "queryLoop dispatches tool calls with MockProvider" {
+    // Use an arena because the query loop's tool-input JSON parsing intentionally
+    // keeps the Parsed arena alive (tool inputs reference it).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const testing_mod = @import("testing.zig");
+
+    // Simulate: model calls FakeTool, then produces a final text response
+    const turn1_deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .content_block_start, .tool_use_id = "t1", .tool_name = "FakeTool" },
+        .{ .@"type" = .tool_use_delta, .partial_json = "{}" },
+        .{ .@"type" = .content_block_stop },
+        .{ .@"type" = .message_stop },
+    };
+    const turn2_deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .text_delta, .text = "Done!" },
+        .{ .@"type" = .message_stop },
+    };
+    var mock = testing_mod.MockProvider.init(allocator, &.{
+        .{ .deltas = &turn1_deltas },
+        .{ .deltas = &turn2_deltas },
+    });
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    var session = session_mod.Session.init(allocator);
+    var perm_ctx = perm.PermissionContext{ .mode = .bypass };
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    var reg = tools_reg.ToolRegistry.init(allocator);
+
+    var fake = testing_mod.FakeTool{};
+    const fake_tool = @import("tool.zig").buildTool(testing_mod.FakeTool, &fake);
+    try reg.register(fake_tool);
+
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Call FakeTool" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+        .max_turns = 10,
+    }, &msgs);
+
+    var iter = loop_iter.toEventIterator();
+
+    var saw_done_text = false;
+    var saw_result = false;
+    while (iter.next()) |event| {
+        switch (event) {
+            .stream_event => |delta| {
+                if (delta.text) |t| {
+                    if (std.mem.eql(u8, t, "Done!")) saw_done_text = true;
+                }
+            },
+            .result => |r| {
+                saw_result = true;
+                try std.testing.expect(!r.is_error);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_done_text);
+    try std.testing.expect(saw_result);
+    try std.testing.expectEqual(@as(u32, 1), fake.call_count);
+}
+
+test "queryLoop yields provider error" {
+    const allocator = std.testing.allocator;
+    const testing_mod = @import("testing.zig");
+
+    // Empty responses → ServerError on first call
+    var mock = testing_mod.MockProvider.init(allocator, &.{});
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    defer msgs.deinit();
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var session = session_mod.Session.init(allocator);
+    defer session.deinit();
+    var perm_ctx = perm.PermissionContext{};
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    defer cache.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Hi" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+    }, &msgs);
+    defer {
+        if (loop_iter.tool_exec) |*exec| exec.deinit();
+        loop_iter.text_buf.deinit(allocator);
+        loop_iter.tool_json_buf.deinit(allocator);
+    }
+
+    var iter = loop_iter.toEventIterator();
+    const event = iter.next().?;
+    try std.testing.expectEqualStrings("error_server", event.result.subtype);
+}
+
 test "queryLoop yields error on abort" {
     const allocator = std.testing.allocator;
     var msgs = message_mod.MessageStore.init(allocator);

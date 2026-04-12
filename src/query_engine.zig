@@ -213,3 +213,110 @@ test "QueryEngine init and deinit" {
 
     try std.testing.expectEqual(@as(usize, 0), engine.messageCount());
 }
+
+test "QueryEngine seedMessages parses user and assistant" {
+    const allocator = std.testing.allocator;
+    var perm_ctx = perm.PermissionContext{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = context_mod.SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    var engine = QueryEngine.init(.{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .context_strategy = &strategy,
+    });
+    defer engine.deinit();
+
+    try engine.seedMessages(
+        \\[{"role":"user","content":"hello"},{"role":"assistant","content":"hi there"},{"role":"user","content":"bye"}]
+    );
+    try std.testing.expectEqual(@as(usize, 3), engine.messageCount());
+
+    // Verify first message is user
+    const items = engine.messages.items();
+    try std.testing.expectEqualStrings("hello", items[0].user.content[0].text);
+    try std.testing.expectEqualStrings("hi there", items[1].assistant.content[0].text);
+    try std.testing.expectEqualStrings("bye", items[2].user.content[0].text);
+}
+
+test "QueryEngine seedMessages rejects non-array" {
+    const allocator = std.testing.allocator;
+    var perm_ctx = perm.PermissionContext{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = context_mod.SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    var engine = QueryEngine.init(.{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .context_strategy = &strategy,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.InvalidFormat, engine.seedMessages("\"not an array\""));
+}
+
+test "QueryEngine seedMessages skips unknown roles" {
+    const allocator = std.testing.allocator;
+    var perm_ctx = perm.PermissionContext{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = context_mod.SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    var engine = QueryEngine.init(.{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .context_strategy = &strategy,
+    });
+    defer engine.deinit();
+
+    try engine.seedMessages(
+        \\[{"role":"system","content":"ignored"},{"role":"user","content":"kept"}]
+    );
+    // Only "user" role should be added, "system" is skipped
+    try std.testing.expectEqual(@as(usize, 1), engine.messageCount());
+}
+
+test "QueryEngine abortQuery sets abort flag" {
+    const allocator = std.testing.allocator;
+    var perm_ctx = perm.PermissionContext{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = context_mod.SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    var engine = QueryEngine.init(.{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .context_strategy = &strategy,
+    });
+    defer engine.deinit();
+
+    try std.testing.expect(!engine.abort.isAborted());
+    engine.abortQuery("user cancelled");
+    try std.testing.expect(engine.abort.isAborted());
+}

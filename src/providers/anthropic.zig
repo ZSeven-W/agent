@@ -345,3 +345,51 @@ test "buildRequestBody produces valid JSON" {
     try std.testing.expectEqualStrings("claude-sonnet-4-6", json_mod.getString(parsed.value, "model").?);
     try std.testing.expectEqual(true, json_mod.getBool(parsed.value, "stream").?);
 }
+
+test "buildRequestBody includes system prompt" {
+    const allocator = std.testing.allocator;
+    const body = try AnthropicProvider.buildRequestBody(
+        allocator,
+        "claude-sonnet-4-6",
+        &.{.{ .role = "user", .content = .{ .string = "hello" } }},
+        null,
+        .{ .max_tokens = 1024, .system_prompt = "You are a helpful assistant." },
+    );
+    defer allocator.free(body);
+    const parsed = try json_mod.parse(allocator, body);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("You are a helpful assistant.", json_mod.getString(parsed.value, "system").?);
+}
+
+test "buildRequestBody includes tools" {
+    const allocator = std.testing.allocator;
+    const tools = [_]types.ToolSchema{
+        .{
+            .name = "read_file",
+            .description = "Read a file from disk",
+            .input_schema = .{ .string = "{}" },
+        },
+    };
+    const body = try AnthropicProvider.buildRequestBody(
+        allocator,
+        "claude-sonnet-4-6",
+        &.{},
+        &tools,
+        .{ .max_tokens = 512 },
+    );
+    defer allocator.free(body);
+    const parsed = try json_mod.parse(allocator, body);
+    defer parsed.deinit();
+
+    // Verify tools array exists
+    const root = parsed.value;
+    const tools_val = root.object.get("tools").?;
+    try std.testing.expectEqual(@as(usize, 1), tools_val.array.items.len);
+    const tool_obj = tools_val.array.items[0];
+    try std.testing.expectEqualStrings("read_file", json_mod.getString(tool_obj, "name").?);
+}
+
+test "AnthropicProvider streamTextFn returns non-null function" {
+    const fn_ptr = AnthropicProvider.streamTextFn();
+    try std.testing.expect(@intFromPtr(fn_ptr) != 0);
+}

@@ -285,3 +285,81 @@ test "presets create valid configs" {
     try std.testing.expect(az.quirks.azure_deployment);
     try std.testing.expectEqualStrings("2024-02-01", az.quirks.api_version.?);
 }
+
+test "presets openai and mistral" {
+    const oi = presets.openai("key", "gpt-4o");
+    try std.testing.expectEqualStrings("openai", oi.base.id);
+    try std.testing.expectEqualStrings("gpt-4o", oi.base.model);
+    try std.testing.expectEqual(@as(?u32, 128_000), oi.base.max_context_tokens);
+
+    const mi = presets.mistral("key", "mistral-large");
+    try std.testing.expectEqualStrings("mistral", mi.base.id);
+    try std.testing.expectEqualStrings("mistral-large", mi.base.model);
+}
+
+test "OpenAICompatProvider creates valid Provider" {
+    var op = OpenAICompatProvider.init(std.testing.allocator, presets.openai("test-key", "gpt-4o"));
+    const p = op.provider();
+    try std.testing.expectEqualStrings("openai", p.getId());
+    try std.testing.expectEqual(@as(u32, 128_000), p.getMaxContextTokens());
+    try std.testing.expect(!p.supportsThinking());
+}
+
+test "OpenAICompatProvider deepseek supports thinking" {
+    var op = OpenAICompatProvider.init(std.testing.allocator, presets.deepseek("key", "deepseek-r1"));
+    const p = op.provider();
+    try std.testing.expect(p.supportsThinking());
+    try std.testing.expectEqual(@as(u32, 65536), p.getMaxContextTokens());
+}
+
+test "buildRequestBody produces valid OpenAI JSON" {
+    const allocator = std.testing.allocator;
+    const config = presets.openai("key", "gpt-4o");
+    const body = try OpenAICompatProvider.buildRequestBody(
+        allocator,
+        config,
+        &.{.{ .role = "user", .content = .{ .string = "hello" } }},
+        null,
+        .{ .max_tokens = 2048 },
+    );
+    defer allocator.free(body);
+    const parsed = try json_mod.parse(allocator, body);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("gpt-4o", json_mod.getString(parsed.value, "model").?);
+    try std.testing.expectEqual(true, json_mod.getBool(parsed.value, "stream").?);
+    // stream_options should be present (openai preset supports it)
+    try std.testing.expect(parsed.value.object.get("stream_options") != null);
+}
+
+test "buildRequestBody includes tools in OpenAI function format" {
+    const allocator = std.testing.allocator;
+    const config = presets.openai("key", "gpt-4o");
+    const tools = [_]types.ToolSchema{
+        .{
+            .name = "search",
+            .description = "Search the web",
+            .input_schema = .{ .string = "{}" },
+        },
+    };
+    const body = try OpenAICompatProvider.buildRequestBody(
+        allocator,
+        config,
+        &.{},
+        &tools,
+        .{ .max_tokens = 1024 },
+    );
+    defer allocator.free(body);
+    const parsed = try json_mod.parse(allocator, body);
+    defer parsed.deinit();
+
+    const tools_arr = parsed.value.object.get("tools").?;
+    try std.testing.expectEqual(@as(usize, 1), tools_arr.array.items.len);
+    const tool_obj = tools_arr.array.items[0];
+    try std.testing.expectEqualStrings("function", json_mod.getString(tool_obj, "type").?);
+}
+
+test "OpenAICompatProvider streamTextFn returns non-null function" {
+    const fn_ptr = OpenAICompatProvider.streamTextFn();
+    try std.testing.expect(@intFromPtr(fn_ptr) != 0);
+}

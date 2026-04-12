@@ -90,3 +90,100 @@ pub const FakeTool = struct {
         return false;
     }
 };
+
+// ─── Tests ───
+
+const tool_builder = @import("tool.zig");
+
+test "MockProvider returns scripted deltas" {
+    const allocator = std.testing.allocator;
+    const deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .text_delta, .text = "hello" },
+        .{ .@"type" = .text_delta, .text = " world" },
+        .{ .@"type" = .message_stop },
+    };
+    var mock = MockProvider.init(allocator, &.{.{ .deltas = &deltas }});
+    var p = mock.provider();
+
+    var iter = try p.vtable.stream_text(p.ptr, &.{}, null, .{});
+    const d1 = iter.next().?;
+    try std.testing.expectEqualStrings("hello", d1.text.?);
+    const d2 = iter.next().?;
+    try std.testing.expectEqualStrings(" world", d2.text.?);
+    const d3 = iter.next().?;
+    try std.testing.expect(d3.@"type" == .message_stop);
+    try std.testing.expectEqual(@as(?streaming_events.StreamDelta, null), iter.next());
+}
+
+test "MockProvider returns error when responses exhausted" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, &.{});
+    var p = mock.provider();
+
+    try std.testing.expectError(error.ServerError, p.vtable.stream_text(p.ptr, &.{}, null, .{}));
+}
+
+test "MockProvider serves multiple scripted responses" {
+    const allocator = std.testing.allocator;
+    const resp1 = [_]streaming_events.StreamDelta{.{ .@"type" = .text_delta, .text = "first" }};
+    const resp2 = [_]streaming_events.StreamDelta{.{ .@"type" = .text_delta, .text = "second" }};
+    var mock = MockProvider.init(allocator, &.{
+        .{ .deltas = &resp1 },
+        .{ .deltas = &resp2 },
+    });
+    var p = mock.provider();
+
+    // First call
+    var iter1 = try p.vtable.stream_text(p.ptr, &.{}, null, .{});
+    try std.testing.expectEqualStrings("first", iter1.next().?.text.?);
+
+    // Second call
+    var iter2 = try p.vtable.stream_text(p.ptr, &.{}, null, .{});
+    try std.testing.expectEqualStrings("second", iter2.next().?.text.?);
+}
+
+test "MockProvider vtable metadata" {
+    const allocator = std.testing.allocator;
+    var mock = MockProvider.init(allocator, &.{});
+    const p = mock.provider();
+
+    try std.testing.expectEqualStrings("mock", p.getId());
+    try std.testing.expectEqual(@as(u32, 100_000), p.getMaxContextTokens());
+    try std.testing.expect(!p.supportsThinking());
+}
+
+test "FakeTool records calls and returns configured value" {
+    var ft = FakeTool{ .return_value = .{ .string = "ok" } };
+    const tool = tool_builder.buildTool(FakeTool, &ft);
+
+    try std.testing.expectEqualStrings("FakeTool", tool.getName());
+    try std.testing.expect(!tool.isReadOnly(.null));
+    try std.testing.expectEqual(@as(u32, 0), ft.call_count);
+}
+
+test "FakeTool call increments count" {
+    var ft = FakeTool{};
+    var abort = @import("abort.zig").AbortController{};
+    var cache = @import("file_cache.zig").FileStateCache.init(std.testing.allocator, 10, 1024);
+    defer cache.deinit();
+    var msgs = @import("message.zig").MessageStore.init(std.testing.allocator);
+    defer msgs.deinit();
+    var perm_ctx = @import("permission.zig").PermissionContext{};
+    var hooks = @import("hook.zig").HookRunner.init(std.testing.allocator);
+    defer hooks.deinit();
+
+    var ctx = tool_builder.ToolUseContext{
+        .allocator = std.testing.allocator,
+        .cwd = "/tmp",
+        .abort_controller = &abort,
+        .file_cache = &cache,
+        .messages = &msgs,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+    };
+
+    const tool = tool_builder.buildTool(FakeTool, &ft);
+    _ = try tool.call(.null, &ctx);
+    _ = try tool.call(.null, &ctx);
+    try std.testing.expectEqual(@as(u32, 2), ft.call_count);
+}

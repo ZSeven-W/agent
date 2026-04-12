@@ -97,6 +97,38 @@ test "Session skip timestamps" {
     try std.testing.expect(!session.skipped_timestamps.contains(99999));
 }
 
+test "Session flush no-op without path" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator);
+    defer session.deinit();
+
+    try session.record("line1");
+    // flush without setPath is a no-op — pending entries remain
+    try session.flush(3);
+    try std.testing.expectEqual(@as(usize, 1), session.pendingCount());
+}
+
+test "Session flush no-op with empty pending" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator);
+    defer session.deinit();
+
+    session.setPath("/tmp/nonexistent.jsonl");
+    // Nothing recorded — flush should be a no-op
+    try session.flush(3);
+    try std.testing.expectEqual(@as(usize, 0), session.pendingCount());
+}
+
+test "Session setPath updates file path" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator);
+    defer session.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u8, null), session.file_path);
+    session.setPath("/tmp/session.jsonl");
+    try std.testing.expectEqualStrings("/tmp/session.jsonl", session.file_path.?);
+}
+
 test "Session flush to temp file" {
     const allocator = std.testing.allocator;
     var session = Session.init(allocator);

@@ -317,3 +317,69 @@ test "EventBuffer push and iterate" {
     const ev3 = iter.next();
     try std.testing.expectEqual(@as(?Event, null), ev3);
 }
+
+test "EventBuffer handles stream_event and tool_progress" {
+    const allocator = std.testing.allocator;
+    var buf = EventBuffer.init(allocator);
+    defer buf.deinit();
+
+    try buf.push(Event{ .stream_event = StreamDelta{
+        .@"type" = .text_delta,
+        .text = "hello",
+    } });
+    try buf.push(Event{ .tool_progress = ToolProgress{
+        .tool_name = "ReadFile",
+        .tool_use_id = "t1",
+        .data = .{ .string = "reading..." },
+    } });
+
+    const handle = try buf.iterator();
+    defer allocator.destroy(handle.state);
+    var iter = handle.iter;
+
+    const ev1 = iter.next().?;
+    try std.testing.expectEqualStrings("hello", ev1.stream_event.text.?);
+
+    const ev2 = iter.next().?;
+    try std.testing.expectEqualStrings("ReadFile", ev2.tool_progress.tool_name);
+    try std.testing.expectEqualStrings("t1", ev2.tool_progress.tool_use_id);
+
+    try std.testing.expectEqual(@as(?Event, null), iter.next());
+}
+
+test "StreamDelta defaults" {
+    const delta = StreamDelta{ .@"type" = .message_start };
+    try std.testing.expectEqual(@as(u32, 0), delta.index);
+    try std.testing.expectEqual(@as(?[]const u8, null), delta.text);
+    try std.testing.expectEqual(@as(?[]const u8, null), delta.tool_use_id);
+    try std.testing.expectEqual(@as(?[]const u8, null), delta.tool_name);
+    try std.testing.expectEqual(@as(?[]const u8, null), delta.partial_json);
+}
+
+test "ResultData struct fields" {
+    const rd = ResultData{
+        .is_error = false,
+        .subtype = "success",
+        .result = "all done",
+        .num_turns = 5,
+        .total_cost_usd = 0.05,
+        .duration_ms = 3000,
+    };
+    try std.testing.expect(!rd.is_error);
+    try std.testing.expectEqualStrings("success", rd.subtype);
+    try std.testing.expectEqualStrings("all done", rd.result.?);
+    try std.testing.expectEqual(@as(u32, 5), rd.num_turns);
+    try std.testing.expectEqual(@as(?[]const []const u8, null), rd.errors);
+}
+
+test "EventBuffer empty iteration" {
+    const allocator = std.testing.allocator;
+    var buf = EventBuffer.init(allocator);
+    defer buf.deinit();
+
+    const handle = try buf.iterator();
+    defer allocator.destroy(handle.state);
+    var iter = handle.iter;
+
+    try std.testing.expectEqual(@as(?Event, null), iter.next());
+}
