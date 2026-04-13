@@ -360,6 +360,15 @@ pub const QueryLoopIterator = struct {
                     return nextEvent(ctx);
                 } else |err| {
                     self.phase = .done;
+                    // Surface the upstream HTTP error body if the provider
+                    // captured one. Storage is owned by the provider and
+                    // remains valid for the lifetime of this iterator.
+                    const captured = self.params.provider.lastError();
+                    const errors_slice: ?[]const []const u8 = if (captured) |msg| blk: {
+                        const arr = self.params.allocator.alloc([]const u8, 1) catch break :blk null;
+                        arr[0] = msg;
+                        break :blk arr;
+                    } else null;
                     return .{ .result = .{
                         .is_error = true,
                         .subtype = switch (err) {
@@ -372,6 +381,7 @@ pub const QueryLoopIterator = struct {
                         .num_turns = self.state.turn_count,
                         .total_cost_usd = 0,
                         .duration_ms = 0,
+                        .errors = errors_slice,
                     } };
                 }
             },

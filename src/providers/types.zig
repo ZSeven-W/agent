@@ -66,6 +66,12 @@ pub const Provider = struct {
             tools: ?[]const ToolSchema,
             config: StreamConfig,
         ) StreamError!StreamIterator,
+
+        /// Optional accessor for the most recent transport-layer error message
+        /// (HTTP error body, etc.) captured during stream_text. The returned
+        /// slice is owned by the provider and remains valid until the next call.
+        /// Returns null when no error message is available.
+        last_error: ?*const fn (*anyopaque) ?[]const u8 = null,
     };
 
     pub fn getId(self: Provider) []const u8 {
@@ -78,6 +84,15 @@ pub const Provider = struct {
 
     pub fn supportsThinking(self: Provider) bool {
         return self.vtable.supports_thinking;
+    }
+
+    /// Get the most recent transport-layer error message captured during
+    /// the last `stream_text` call, if the provider exposes one.
+    pub fn lastError(self: Provider) ?[]const u8 {
+        if (self.vtable.last_error) |fn_ptr| {
+            return fn_ptr(self.ptr);
+        }
+        return null;
     }
 };
 

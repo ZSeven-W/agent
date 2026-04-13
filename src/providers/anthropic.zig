@@ -9,6 +9,11 @@ const json_mod = @import("../json.zig");
 pub const AnthropicProvider = struct {
     config: types.ProviderConfig,
     allocator: std.mem.Allocator,
+    /// Inline buffer for the most recent HTTP error body. Reused across
+    /// errors to avoid heap churn; previous content is overwritten.
+    last_error_buf: [2048]u8 = undefined,
+    last_error_len: usize = 0,
+    last_error_status: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: types.ProviderConfig) AnthropicProvider {
         return .{ .config = config, .allocator = allocator };
@@ -21,12 +26,19 @@ pub const AnthropicProvider = struct {
         };
     }
 
+    fn lastError(ptr: *anyopaque) ?[]const u8 {
+        const self: *AnthropicProvider = @ptrCast(@alignCast(ptr));
+        if (self.last_error_len == 0) return null;
+        return self.last_error_buf[0..self.last_error_len];
+    }
+
     const vtable = types.Provider.VTable{
         .id = "anthropic",
         .max_context_tokens = 200_000,
         .supports_thinking = true,
         .supports_tool_use = true,
         .stream_text = streamText,
+        .last_error = lastError,
     };
 
     /// Return the stream_text function pointer at runtime (workaround for
@@ -71,22 +83,34 @@ pub const AnthropicProvider = struct {
         }) catch return error.ConnectionFailed;
 
         if (response.status != .ok) {
-            // Try to read error body for diagnostics. Use readChunk (not reader)
-            // to avoid panics on providers with malformed Transfer-Encoding.
-            var err_buf: [2048]u8 = undefined;
-            const err_n = response.readChunk(&err_buf) catch 0;
-            if (err_n > 0) {
-                std.debug.print("[http] API error {d}: {s}\n", .{ @intFromEnum(response.status), err_buf[0..err_n] });
-            } else {
-                std.debug.print("[http] API error {d}\n", .{@intFromEnum(response.status)});
-            }
+            // DO NOT call response.readChunk() here. The std.http body reader
+            // in Zig 0.15 panics ("access of union field 'body_remaining_..'
+            // while field 'ready' is active") when the upstream uses chunked
+            // transfer-encoding for error responses (MiniMax/Anthropic 529).
+            // The internal readVec loop calls the stream vtable a second time
+            // after EndOfStream and the state-union read is undefined.
+            // We surface the status code only — losing the body text is the
+            // acceptable tradeoff vs aborting the host process.
+            const status_code: u16 = @intFromEnum(response.status);
+            self.last_error_status = status_code;
+            const formatted = std.fmt.bufPrint(
+                &self.last_error_buf,
+                "Upstream HTTP {d} from anthropic provider",
+                .{status_code},
+            ) catch self.last_error_buf[0..0];
+            self.last_error_len = formatted.len;
+            std.debug.print("[http] API error {d} (body skipped to avoid Reader panic)\n", .{status_code});
             response.close();
-            return switch (@intFromEnum(response.status)) {
+            return switch (status_code) {
                 401 => error.AuthenticationFailed,
                 429 => error.RateLimited,
                 else => error.ServerError,
             };
         }
+        // Clear any stale error from a previous failed call so lastError()
+        // doesn't report it after a subsequent success-then-failure pattern.
+        self.last_error_len = 0;
+        self.last_error_status = 0;
 
         const state = self.allocator.create(AnthropicStreamState) catch return error.ConnectionFailed;
         state.* = .{
