@@ -163,14 +163,25 @@ pub const QueryLoopIterator = struct {
     }
 
     /// Store the accumulated assistant message (text + tool_use blocks) in the message store.
+    ///
+    /// When the turn contains `tool_use` but no text (happens with reasoning models
+    /// like MiniMax-M2 that emit `thinking → tool_use` without any textual preamble),
+    /// we insert a placeholder text block. Some Anthropic-compatible endpoints —
+    /// notably MiniMax — intermittently reject subsequent rounds with HTTP 400 when
+    /// the echoed assistant turn consists solely of `tool_use` blocks. A single
+    /// whitespace text block satisfies the validator without altering semantics.
     fn storeAssistantMessage(self: *QueryLoopIterator) void {
         const has_text = self.text_buf.items.len > 0;
         const has_tools = self.tool_exec != null and self.tool_exec.?.tracked.items.len > 0;
         if (!has_text and !has_tools) return;
 
+        // Insert a placeholder text block when tool_use is alone, so the echoed
+        // assistant turn never has content == [tool_use, ...] only.
+        const needs_placeholder_text = has_tools and !has_text;
+
         // Count content blocks needed
         var block_count: usize = 0;
-        if (has_text) block_count += 1;
+        if (has_text or needs_placeholder_text) block_count += 1;
         if (has_tools) block_count += self.tool_exec.?.tracked.items.len;
 
         // Allocate through the message store's arena so text / block ids /
@@ -182,6 +193,11 @@ pub const QueryLoopIterator = struct {
         if (has_text) {
             const text_copy = msg_alloc.dupe(u8, self.text_buf.items) catch return;
             content[idx] = .{ .text = text_copy };
+            idx += 1;
+        } else if (needs_placeholder_text) {
+            // Single-space placeholder — satisfies Anthropic-compat validators
+            // that require at least one non-tool_use block in an assistant turn.
+            content[idx] = .{ .text = " " };
             idx += 1;
         }
 

@@ -9,3 +9,4 @@ napi/*.node
 # OS
 .DS_Store
 .claude/projects
+.omx/
