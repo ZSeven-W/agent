@@ -36,6 +36,7 @@ export const {
   createAnthropicProvider,
   createOpenAICompatProvider,
   destroyProvider,
+  setProviderPlaceholderTextQuirk,
   createToolRegistry,
   registerToolSchema,
   destroyToolRegistry,

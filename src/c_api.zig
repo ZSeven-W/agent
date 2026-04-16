@@ -67,6 +67,7 @@ export fn agent_create_anthropic_provider(
     iface.* = .{
         .ptr = @ptrCast(impl),
         .vtable = vtable_ptr,
+        .needs_placeholder_text_before_tool_use = providers_types.detectPlaceholderTextQuirk(base_url, model),
     };
     return @ptrCast(iface);
 }
@@ -170,12 +171,28 @@ export fn agent_create_openai_compat_provider(
     iface.* = .{
         .ptr = @ptrCast(impl),
         .vtable = vtable_ptr,
+        .needs_placeholder_text_before_tool_use = providers_types.detectPlaceholderTextQuirk(base_url, model),
     };
     return @ptrCast(iface);
 }
 
 /// No-op: providers are freed on engine destroy. Stub for API completeness.
 export fn agent_destroy_provider(_: AgentProviderHandle) void {}
+
+/// Override the `needs_placeholder_text_before_tool_use` quirk on an
+/// already-created provider handle. Creation auto-detects MiniMax via
+/// `detectPlaceholderTextQuirk(base_url, model)`; this setter is only
+/// needed when a caller wants to force the quirk on/off explicitly (e.g.
+/// a new endpoint exhibiting the same HTTP 400 behavior that our detector
+/// hasn't been taught about yet).
+export fn agent_provider_set_placeholder_text_quirk(
+    handle: AgentProviderHandle,
+    enabled: bool,
+) void {
+    if (handle == null) return;
+    const p: *providers_types.Provider = @ptrCast(@alignCast(handle.?));
+    p.needs_placeholder_text_before_tool_use = enabled;
+}
 
 // ─── Tool registry ───
 

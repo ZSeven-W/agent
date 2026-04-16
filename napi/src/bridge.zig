@@ -63,6 +63,7 @@ extern fn napi_create_int32(env: napi_env, value: i32, result: *napi_value) napi
 extern fn napi_throw_error(env: napi_env, code: ?[*:0]const u8, msg: [*:0]const u8) napi_status;
 extern fn napi_is_null(env: napi_env, value: napi_value, result: *bool) napi_status;
 extern fn napi_is_undefined(env: napi_env, value: napi_value, result: *bool) napi_status;
+extern fn napi_get_value_bool(env: napi_env, value: napi_value, result: *bool) napi_status;
 
 const napi_async_work = *anyopaque;
 const napi_deferred = *anyopaque;
@@ -83,6 +84,7 @@ extern fn agent_version() [*:0]const u8;
 extern fn agent_create_anthropic_provider(api_key_ptr: [*]const u8, api_key_len: usize, model_ptr: [*]const u8, model_len: usize, base_url_ptr: ?[*]const u8, base_url_len: usize, max_context_tokens: u32) Handle;
 extern fn agent_create_openai_compat_provider(api_key_ptr: [*]const u8, api_key_len: usize, base_url_ptr: [*]const u8, base_url_len: usize, model_ptr: [*]const u8, model_len: usize, max_context_tokens: u32) Handle;
 extern fn agent_destroy_provider(handle: Handle) void;
+extern fn agent_provider_set_placeholder_text_quirk(handle: Handle, enabled: bool) void;
 extern fn agent_create_engine(provider: Handle, tools: Handle, system_prompt_ptr: ?[*]const u8, system_prompt_len: usize, max_turns: u32, max_output_tokens: u32) Handle;
 extern fn agent_destroy_engine(handle: Handle) void;
 extern fn agent_submit_message(engine: Handle, prompt_ptr: [*]const u8, prompt_len: usize) Handle;
@@ -233,6 +235,18 @@ fn js_destroyProvider(env: napi_env, info: napi_callback_info) callconv(.c) napi
     var argv: [1]napi_value = undefined;
     _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
     if (argc >= 1) agent_destroy_provider(unwrapHandle(env, argv[0]));
+    return undefinedVal(env);
+}
+
+fn js_setProviderPlaceholderTextQuirk(env: napi_env, info: napi_callback_info) callconv(.c) napi_value {
+    var argc: usize = 2;
+    var argv: [2]napi_value = undefined;
+    _ = napi_get_cb_info(env, info, &argc, &argv, null, null);
+    if (argc < 2) return undefinedVal(env);
+    const handle = unwrapHandle(env, argv[0]);
+    var enabled: bool = false;
+    _ = napi_get_value_bool(env, argv[1], &enabled);
+    agent_provider_set_placeholder_text_quirk(handle, enabled);
     return undefinedVal(env);
 }
 
@@ -756,6 +770,7 @@ export fn napi_register_module_v1(env: napi_env, exports: napi_value) napi_value
     registerFn(env, exports, "createAnthropicProvider", js_createAnthropicProvider);
     registerFn(env, exports, "createOpenAICompatProvider", js_createOpenAICompatProvider);
     registerFn(env, exports, "destroyProvider", js_destroyProvider);
+    registerFn(env, exports, "setProviderPlaceholderTextQuirk", js_setProviderPlaceholderTextQuirk);
     registerFn(env, exports, "createToolRegistry", js_createToolRegistry);
     registerFn(env, exports, "registerToolSchema", js_registerToolSchema);
     registerFn(env, exports, "destroyToolRegistry", js_destroyToolRegistry);

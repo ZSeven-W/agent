@@ -18,6 +18,10 @@ const etq_mod = @import("external_tool_queue.zig");
 pub const Event = streaming_events.Event;
 pub const EventIterator = streaming_events.EventIterator;
 
+/// Single-space text used as a placeholder block for providers that set
+/// `needs_placeholder_text_before_tool_use`. See `storeAssistantMessage`.
+const PLACEHOLDER_TEXT_BEFORE_TOOL_USE: []const u8 = " ";
+
 pub const Transition = enum {
     tool_use,
     collapse_drain,
@@ -164,20 +168,21 @@ pub const QueryLoopIterator = struct {
 
     /// Store the accumulated assistant message (text + tool_use blocks) in the message store.
     ///
-    /// When the turn contains `tool_use` but no text (happens with reasoning models
-    /// like MiniMax-M2 that emit `thinking → tool_use` without any textual preamble),
-    /// we insert a placeholder text block. Some Anthropic-compatible endpoints —
-    /// notably MiniMax — intermittently reject subsequent rounds with HTTP 400 when
-    /// the echoed assistant turn consists solely of `tool_use` blocks. A single
-    /// whitespace text block satisfies the validator without altering semantics.
+    /// Providers that set `needs_placeholder_text_before_tool_use` (currently
+    /// MiniMax-M2 and similar reasoning-first Anthropic-compat endpoints) get a
+    /// single-space text block injected before tool_use blocks when the turn
+    /// would otherwise echo back as content = [tool_use, ...] only. Those
+    /// endpoints intermittently reject such follow-up rounds with HTTP 400.
+    /// Anthropic proper and OpenAI-compat keep the default (no injection), so
+    /// their echoed turns stay byte-identical to what the model emitted.
     fn storeAssistantMessage(self: *QueryLoopIterator) void {
         const has_text = self.text_buf.items.len > 0;
         const has_tools = self.tool_exec != null and self.tool_exec.?.tracked.items.len > 0;
         if (!has_text and !has_tools) return;
 
-        // Insert a placeholder text block when tool_use is alone, so the echoed
-        // assistant turn never has content == [tool_use, ...] only.
-        const needs_placeholder_text = has_tools and !has_text;
+        const needs_placeholder_text =
+            self.params.provider.needs_placeholder_text_before_tool_use and
+            has_tools and !has_text;
 
         // Count content blocks needed
         var block_count: usize = 0;
@@ -195,9 +200,8 @@ pub const QueryLoopIterator = struct {
             content[idx] = .{ .text = text_copy };
             idx += 1;
         } else if (needs_placeholder_text) {
-            // Single-space placeholder — satisfies Anthropic-compat validators
-            // that require at least one non-tool_use block in an assistant turn.
-            content[idx] = .{ .text = " " };
+            // Provider-opt-in placeholder — see storeAssistantMessage doc.
+            content[idx] = .{ .text = PLACEHOLDER_TEXT_BEFORE_TOOL_USE };
             idx += 1;
         }
 

@@ -15,6 +15,13 @@ export interface AgentEvent {
 export declare function createAnthropicProvider(apiKey: string, model: string, baseUrl?: string, maxContextTokens?: number): ProviderHandle;
 export declare function createOpenAICompatProvider(apiKey: string, baseUrl: string, model: string, maxContextTokens?: number): ProviderHandle;
 export declare function destroyProvider(handle: ProviderHandle): void;
+/**
+ * Enable a provider-side quirk: insert a single-space placeholder text block
+ * before any tool_use blocks when echoing an assistant turn. Required by
+ * Anthropic-compat endpoints (notably MiniMax) that reject tool_use-only
+ * content with HTTP 400. Defaults to false.
+ */
+export declare function setProviderPlaceholderTextQuirk(handle: ProviderHandle, enabled: boolean): void;
 
 // ─── Tool registry ───
 export declare function createToolRegistry(): ToolRegistryHandle;

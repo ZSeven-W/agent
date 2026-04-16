@@ -52,6 +52,14 @@ pub const ProviderConfig = struct {
 pub const Provider = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    /// Some Anthropic-compat endpoints (notably MiniMax) reject follow-up
+    /// rounds with HTTP 400 when an echoed assistant turn's content is
+    /// tool_use-only. When true, `query.zig` inserts a single-space text
+    /// block before tool_use blocks to satisfy the validator. The default
+    /// is false, but `c_api.zig` auto-enables it via `detectPlaceholderTextQuirk`
+    /// when `base_url`/`model` mentions MiniMax; `agent_provider_set_placeholder_text_quirk`
+    /// remains available as an explicit override.
+    needs_placeholder_text_before_tool_use: bool = false,
 
     pub const VTable = struct {
         id: []const u8,
@@ -80,6 +88,50 @@ pub const Provider = struct {
         return self.vtable.supports_thinking;
     }
 };
+
+/// Case-insensitive substring match used to detect vendor-specific quirks
+/// from `base_url` / `model` without pulling in locale-aware helpers.
+fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            const a = haystack[i + j];
+            const b = needle[j];
+            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+            const bl = if (b >= 'A' and b <= 'Z') b + 32 else b;
+            if (al != bl) break;
+        }
+        if (j == needle.len) return true;
+    }
+    return false;
+}
+
+/// Detect whether a provider configuration needs the `tool_use` placeholder
+/// workaround. MiniMax's Anthropic-compat endpoint returns HTTP 400 when an
+/// echoed assistant turn contains only `tool_use` blocks (no text). Match
+/// on base URL or model name so both the Anthropic-compat and OpenAI-compat
+/// MiniMax endpoints get the quirk automatically — callers never have to
+/// know, and `agent_provider_set_placeholder_text_quirk` remains as an
+/// explicit override.
+pub fn detectPlaceholderTextQuirk(base_url: ?[]const u8, model: []const u8) bool {
+    if (base_url) |bu| {
+        if (containsCaseInsensitive(bu, "minimax")) return true;
+    }
+    return containsCaseInsensitive(model, "minimax");
+}
+
+test "detectPlaceholderTextQuirk" {
+    try std.testing.expect(detectPlaceholderTextQuirk("https://api.minimaxi.com/v1", "x"));
+    try std.testing.expect(detectPlaceholderTextQuirk("https://api.minimax.io/anthropic", "x"));
+    try std.testing.expect(detectPlaceholderTextQuirk(null, "MiniMax-M2"));
+    try std.testing.expect(detectPlaceholderTextQuirk(null, "minimax-m1"));
+    try std.testing.expect(!detectPlaceholderTextQuirk("https://api.anthropic.com", "claude-opus-4-5"));
+    try std.testing.expect(!detectPlaceholderTextQuirk(null, "gpt-4o"));
+    try std.testing.expect(!detectPlaceholderTextQuirk(null, ""));
+}
 
 /// Check whether a base URL already ends with a version segment (e.g. /v1, /v3, /v4).
 /// When true, providers should NOT prepend an extra `/v1` prefix.
