@@ -291,3 +291,90 @@ test "MemberEvent struct defaults" {
     try std.testing.expectEqual(@as(?[]const u8, null), evt.task);
     try std.testing.expectEqual(@as(?[]const u8, null), evt.result);
 }
+
+test "Team addMember and getMember" {
+    const allocator = std.testing.allocator;
+    var lead_reg = tools_reg.ToolRegistry.init(allocator);
+    defer lead_reg.deinit();
+    var member_reg = tools_reg.ToolRegistry.init(allocator);
+    defer member_reg.deinit();
+
+    var team_inst = try Team.init(.{
+        .allocator = allocator,
+        .lead_provider = undefined,
+        .lead_tools = &lead_reg,
+        .members = &.{},
+    });
+    defer team_inst.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), team_inst.memberCount());
+
+    try team_inst.addMember(.{
+        .id = "worker-1",
+        .provider = undefined,
+        .tools = &member_reg,
+        .system_prompt = "You are worker 1.",
+        .max_turns = 10,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), team_inst.memberCount());
+
+    // getMember should find the member
+    const member = team_inst.getMember("worker-1");
+    try std.testing.expect(member != null);
+
+    // getMember should return null for unknown
+    try std.testing.expectEqual(@as(?*query_engine_mod.QueryEngine, null), team_inst.getMember("nonexistent"));
+}
+
+test "Team init with members" {
+    const allocator = std.testing.allocator;
+    var lead_reg = tools_reg.ToolRegistry.init(allocator);
+    defer lead_reg.deinit();
+    var m1_reg = tools_reg.ToolRegistry.init(allocator);
+    defer m1_reg.deinit();
+    var m2_reg = tools_reg.ToolRegistry.init(allocator);
+    defer m2_reg.deinit();
+
+    const members = [_]TeamMemberConfig{
+        .{ .id = "coder", .provider = undefined, .tools = &m1_reg, .system_prompt = "Code things" },
+        .{ .id = "reviewer", .provider = undefined, .tools = &m2_reg, .system_prompt = "Review things" },
+    };
+
+    var team_inst = try Team.init(.{
+        .allocator = allocator,
+        .lead_provider = undefined,
+        .lead_tools = &lead_reg,
+        .members = &members,
+    });
+    defer team_inst.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), team_inst.memberCount());
+    try std.testing.expect(team_inst.getMember("coder") != null);
+    try std.testing.expect(team_inst.getMember("reviewer") != null);
+}
+
+test "Team registerDelegateTool adds schema" {
+    // Use an arena because registerDelegateTool intentionally keeps parsed JSON
+    // alive (ToolSchema references it), which leaks under std.testing.allocator.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var lead_reg = tools_reg.ToolRegistry.init(allocator);
+    defer lead_reg.deinit();
+
+    var team_inst = try Team.init(.{
+        .allocator = allocator,
+        .lead_provider = undefined,
+        .lead_tools = &lead_reg,
+        .members = &.{},
+    });
+    defer team_inst.deinit();
+
+    try team_inst.registerDelegateTool();
+
+    // "delegate" should now be known in the lead's tool registry
+    try std.testing.expect(lead_reg.isKnown("delegate"));
+    try std.testing.expect(lead_reg.isExternal("delegate"));
+}

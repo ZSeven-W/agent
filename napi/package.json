@@ -1,6 +1,6 @@
 {
   "name": "@zseven-w/agent-native",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Zig agent SDK — Node-API native addon for Node.js / Bun",
   "type": "module",
   "main": "index.js",

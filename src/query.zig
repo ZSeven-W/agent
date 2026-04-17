@@ -73,9 +73,14 @@ pub fn queryLoop(params: QueryParams, initial_messages: *message_mod.MessageStor
     };
 }
 
+/// Maximum characters for a single tool_result content string.
+/// Larger results are truncated to prevent context bloat (similar to
+/// Claude Code's microcompact strategy of clearing old tool results).
+const TOOL_RESULT_MAX_CHARS: usize = 4000;
+
 /// Convert ContentBlock slice to a JsonValue suitable for the API.
 /// If the slice has a single text block, return a plain string.
-/// Otherwise return a JSON array with typed objects (text, tool_use, tool_result).
+/// Otherwise return a JSON array with typed objects (text, thinking, tool_use, tool_result).
 fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod.ContentBlock) !json_mod.JsonValue {
     // Fast path: single text block → plain string
     if (blocks.len == 1) {
@@ -95,6 +100,15 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
                 try obj.put("text", .{ .string = t });
                 try arr.append(.{ .object = obj });
             },
+            .thinking => |tb| {
+                // Echo thinking blocks back to preserve the reasoning chain.
+                // MiniMax docs confirm: "将完整的 response.content（包含
+                // thinking/text/tool_use 等所有块）添加到消息历史"
+                var obj = std.json.ObjectMap.init(allocator);
+                try obj.put("type", .{ .string = "thinking" });
+                try obj.put("thinking", .{ .string = tb.thinking });
+                try arr.append(.{ .object = obj });
+            },
             .tool_use => |tu| {
                 var obj = std.json.ObjectMap.init(allocator);
                 try obj.put("type", .{ .string = "tool_use" });
@@ -108,15 +122,23 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
                 try obj.put("type", .{ .string = "tool_result" });
                 try obj.put("tool_use_id", .{ .string = tr.tool_use_id });
                 // Anthropic API requires content to be a string, not a JSON object
-                const content_val: json_mod.JsonValue = switch (tr.content) {
+                const raw_val: json_mod.JsonValue = switch (tr.content) {
                     .string => tr.content,
                     else => .{ .string = json_mod.stringify(allocator, tr.content) catch "" },
                 };
+                // Truncate oversized tool results to prevent context overflow
+                const content_val: json_mod.JsonValue = if (raw_val == .string and raw_val.string.len > TOOL_RESULT_MAX_CHARS) blk: {
+                    const truncated = std.fmt.allocPrint(
+                        allocator,
+                        "{s}...[truncated, {d} chars total]",
+                        .{ raw_val.string[0..TOOL_RESULT_MAX_CHARS], raw_val.string.len },
+                    ) catch raw_val.string;
+                    break :blk .{ .string = truncated };
+                } else raw_val;
                 try obj.put("content", content_val);
                 if (tr.is_error) try obj.put("is_error", .{ .bool = true });
                 try arr.append(.{ .object = obj });
             },
-            .thinking => {},
             .image => {},
         }
     }
@@ -140,6 +162,8 @@ pub const QueryLoopIterator = struct {
     tool_json_buf: std.ArrayListUnmanaged(u8) = .{},
     // Accumulates text_delta fragments for the assistant message
     text_buf: std.ArrayListUnmanaged(u8) = .{},
+    // Accumulates thinking_delta fragments for the assistant message
+    thinking_buf: std.ArrayListUnmanaged(u8) = .{},
 
     const Phase = enum {
         start,
@@ -166,7 +190,7 @@ pub const QueryLoopIterator = struct {
         self.tool_json_buf.clearRetainingCapacity();
     }
 
-    /// Store the accumulated assistant message (text + tool_use blocks) in the message store.
+    /// Store the accumulated assistant message (thinking + text + tool_use blocks) in the message store.
     ///
     /// Providers that set `needs_placeholder_text_before_tool_use` (currently
     /// MiniMax-M2 and similar reasoning-first Anthropic-compat endpoints) get a
@@ -176,9 +200,10 @@ pub const QueryLoopIterator = struct {
     /// Anthropic proper and OpenAI-compat keep the default (no injection), so
     /// their echoed turns stay byte-identical to what the model emitted.
     fn storeAssistantMessage(self: *QueryLoopIterator) void {
+        const has_thinking = self.thinking_buf.items.len > 0;
         const has_text = self.text_buf.items.len > 0;
         const has_tools = self.tool_exec != null and self.tool_exec.?.tracked.items.len > 0;
-        if (!has_text and !has_tools) return;
+        if (!has_thinking and !has_text and !has_tools) return;
 
         const needs_placeholder_text =
             self.params.provider.needs_placeholder_text_before_tool_use and
@@ -186,6 +211,7 @@ pub const QueryLoopIterator = struct {
 
         // Count content blocks needed
         var block_count: usize = 0;
+        if (has_thinking) block_count += 1;
         if (has_text or needs_placeholder_text) block_count += 1;
         if (has_tools) block_count += self.tool_exec.?.tracked.items.len;
 
@@ -194,6 +220,15 @@ pub const QueryLoopIterator = struct {
         const msg_alloc = self.state.messages.allocator();
         const content = msg_alloc.alloc(message_mod.ContentBlock, block_count) catch return;
         var idx: usize = 0;
+
+        // Thinking blocks MUST come before text (Anthropic API ordering).
+        // Omitting these causes 400 errors with providers that emit thinking
+        // (MiniMax, DeepSeek, etc.) because the conversation history is invalid.
+        if (has_thinking) {
+            const thinking_copy = msg_alloc.dupe(u8, self.thinking_buf.items) catch return;
+            content[idx] = .{ .thinking = .{ .thinking = thinking_copy } };
+            idx += 1;
+        }
 
         if (has_text) {
             const text_copy = msg_alloc.dupe(u8, self.text_buf.items) catch return;
@@ -225,6 +260,7 @@ pub const QueryLoopIterator = struct {
             .content = content,
         } }) catch {};
 
+        self.thinking_buf.clearRetainingCapacity();
         self.text_buf.clearRetainingCapacity();
     }
 
@@ -273,6 +309,13 @@ pub const QueryLoopIterator = struct {
 
                 self.state.turn_count += 1;
 
+                // Reset tool executor from previous turn so storeAssistantMessage
+                // only records tool_use blocks from THIS turn's assistant response.
+                if (self.tool_exec) |*exec| {
+                    exec.deinit();
+                    self.tool_exec = null;
+                }
+
                 // Convert MessageStore to ApiMessages (preserving tool_use / tool_result blocks).
                 // Everything allocated for the api-message view — the slice itself and the
                 // ObjectMap / Array / JsonValue chain inside each .content — is freed by the
@@ -306,6 +349,15 @@ pub const QueryLoopIterator = struct {
                     }
                 }
 
+                // ── Microcompact: clear old tool results if context is too large ──
+                // Inspired by Claude Code's microcompact strategy: estimate total
+                // content size, and if it exceeds 80% of the provider's context
+                // window, clear old tool_result content from oldest to newest
+                // (keeping the most recent 2 tool results intact).
+                const max_ctx_tokens = self.params.provider.vtable.max_context_tokens;
+                const threshold_chars: usize = @as(usize, max_ctx_tokens) * 4 * 4 / 5; // 80% of max, 4 chars ≈ 1 token
+                microcompactMessages(turn_alloc, api_messages.items, threshold_chars);
+
                 // Build merged tool schemas from registry (executable + external).
                 // Use an arena so that both the slice and any inner JsonValue
                 // allocations (from toJsonValue) are freed together.
@@ -328,6 +380,15 @@ pub const QueryLoopIterator = struct {
                     return nextEvent(ctx);
                 } else |err| {
                     self.phase = .done;
+                    // Surface the upstream HTTP error body if the provider
+                    // captured one. Storage is owned by the provider and
+                    // remains valid for the lifetime of this iterator.
+                    const captured = self.params.provider.lastError();
+                    const errors_slice: ?[]const []const u8 = if (captured) |msg| blk: {
+                        const arr = self.params.allocator.alloc([]const u8, 1) catch break :blk null;
+                        arr[0] = msg;
+                        break :blk arr;
+                    } else null;
                     return .{ .result = .{
                         .is_error = true,
                         .subtype = switch (err) {
@@ -340,6 +401,7 @@ pub const QueryLoopIterator = struct {
                         .num_turns = self.state.turn_count,
                         .total_cost_usd = 0,
                         .duration_ms = 0,
+                        .errors = errors_slice,
                     } };
                 }
             },
@@ -364,6 +426,13 @@ pub const QueryLoopIterator = struct {
                                 .name = delta.tool_name.?,
                                 .input = .null,
                             }, uuid) catch {};
+                        }
+
+                        // Accumulate thinking for assistant message history
+                        if (delta.@"type" == .thinking_delta) {
+                            if (delta.text) |t| {
+                                self.thinking_buf.appendSlice(self.params.allocator, t) catch {};
+                            }
                         }
 
                         // Accumulate text for assistant message history
@@ -599,6 +668,105 @@ pub const QueryLoopIterator = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Microcompact — clear old tool results when context is too large
+// ---------------------------------------------------------------------------
+
+/// Estimate the character count of a JsonValue (rough, no full serialization).
+fn estimateJsonChars(val: json_mod.JsonValue) usize {
+    return switch (val) {
+        .string => |s| s.len + 2, // quotes
+        .integer => 8,
+        .float => 12,
+        .bool => 5,
+        .null => 4,
+        .array => |a| blk: {
+            var sum: usize = 2; // []
+            for (a.items) |item| sum += estimateJsonChars(item) + 1;
+            break :blk sum;
+        },
+        .object => |o| blk: {
+            var sum: usize = 2; // {}
+            var it = o.iterator();
+            while (it.next()) |entry| {
+                sum += entry.key_ptr.len + 4 + estimateJsonChars(entry.value_ptr.*);
+            }
+            break :blk sum;
+        },
+        .number_string => |s| s.len,
+    };
+}
+
+/// Clear old tool_result content when total context size exceeds threshold.
+/// Preserves message structure and keeps the most recent 2 tool results intact.
+/// This is modeled after Claude Code's microcompact strategy.
+fn microcompactMessages(
+    allocator: std.mem.Allocator,
+    messages: []providers_types.ApiMessage,
+    threshold_chars: usize,
+) void {
+    // Estimate total context size
+    var total_chars: usize = 0;
+    for (messages) |msg| {
+        total_chars += msg.role.len + estimateJsonChars(msg.content);
+    }
+
+    if (total_chars <= threshold_chars) return;
+
+    std.debug.print(
+        "[agent-microcompact] context {d} chars exceeds threshold {d}, clearing old tool results\n",
+        .{ total_chars, threshold_chars },
+    );
+
+    // Find all tool_result content blocks (in user messages with array content)
+    // and clear from oldest to newest, keeping the last 2 intact.
+    const KEEP_RECENT: usize = 2;
+    const PosEntry = struct { msg_idx: usize, block_idx: usize, chars: usize };
+    const MAX_POSITIONS: usize = 64;
+    var positions_buf: [MAX_POSITIONS]PosEntry = undefined;
+    var count: usize = 0;
+
+    for (messages, 0..) |msg, mi| {
+        if (!std.mem.eql(u8, msg.role, "user")) continue;
+        if (msg.content != .array) continue;
+        for (msg.content.array.items, 0..) |item, bi| {
+            if (item != .object) continue;
+            const type_val = item.object.get("type") orelse continue;
+            if (type_val != .string) continue;
+            if (!std.mem.eql(u8, type_val.string, "tool_result")) continue;
+            const content_val = item.object.get("content") orelse continue;
+            const chars = estimateJsonChars(content_val);
+            if (count < MAX_POSITIONS) {
+                positions_buf[count] = .{ .msg_idx = mi, .block_idx = bi, .chars = chars };
+                count += 1;
+            }
+        }
+    }
+
+    if (count <= KEEP_RECENT) return;
+
+    // Clear old tool results (keep last KEEP_RECENT)
+    var freed: usize = 0;
+    for (positions_buf[0 .. count - KEEP_RECENT]) |pos| {
+        // Replace content with a compact placeholder
+        const placeholder = std.fmt.allocPrint(
+            allocator,
+            "[cleared \u{2014} {d} chars]",
+            .{pos.chars},
+        ) catch "[cleared]";
+        messages[pos.msg_idx].content.array.items[pos.block_idx].object.put(
+            "content",
+            json_mod.JsonValue{ .string = placeholder },
+        ) catch {};
+        freed += pos.chars;
+    }
+
+    std.debug.print(
+        "[agent-microcompact] cleared {d}/{d} tool results, freed ~{d} chars\n",
+        .{ count - KEEP_RECENT, count, freed },
+    );
+}
+
 test "queryLoop yields error on max_turns exceeded" {
     const allocator = std.testing.allocator;
     var msgs = message_mod.MessageStore.init(allocator);
@@ -630,6 +798,284 @@ test "queryLoop yields error on max_turns exceeded" {
     var iter = loop_iter.toEventIterator();
     const event = iter.next().?;
     try std.testing.expectEqualStrings("error_max_turns", event.result.subtype);
+}
+
+test "contentBlocksToJson single text block returns string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{.{ .text = "hello world" }};
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expectEqualStrings("hello world", result.string);
+}
+
+test "contentBlocksToJson empty blocks returns empty string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{};
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expectEqualStrings("", result.string);
+}
+
+test "contentBlocksToJson multiple blocks returns array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{
+        .{ .text = "I will read the file." },
+        .{ .tool_use = .{
+            .id = "toolu_123",
+            .name = "ReadFile",
+            .input = .null,
+        } },
+    };
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 2), result.array.items.len);
+
+    // First element: text block
+    const text_obj = result.array.items[0].object;
+    try std.testing.expectEqualStrings("text", json_mod.getString(.{ .object = text_obj }, "type").?);
+
+    // Second element: tool_use block
+    const tool_obj = result.array.items[1].object;
+    try std.testing.expectEqualStrings("tool_use", json_mod.getString(.{ .object = tool_obj }, "type").?);
+    try std.testing.expectEqualStrings("toolu_123", json_mod.getString(.{ .object = tool_obj }, "id").?);
+}
+
+test "contentBlocksToJson tool_result block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const blocks = [_]message_mod.ContentBlock{
+        .{ .tool_result = .{
+            .tool_use_id = "toolu_456",
+            .content = .{ .string = "file contents here" },
+            .is_error = false,
+        } },
+        .{ .tool_result = .{
+            .tool_use_id = "toolu_789",
+            .content = .{ .string = "error: not found" },
+            .is_error = true,
+        } },
+    };
+    const result = try contentBlocksToJson(alloc, &blocks);
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 2), result.array.items.len);
+
+    // Check is_error on second result
+    const err_obj = result.array.items[1].object;
+    try std.testing.expect(json_mod.getBool(.{ .object = err_obj }, "is_error").?);
+}
+
+test "queryLoop streams text with MockProvider" {
+    const allocator = std.testing.allocator;
+    const testing_mod = @import("testing.zig");
+
+    const deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .text_delta, .text = "Hello" },
+        .{ .@"type" = .text_delta, .text = " World" },
+        .{ .@"type" = .message_stop },
+    };
+    var mock = testing_mod.MockProvider.init(allocator, &.{.{ .deltas = &deltas }});
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    defer msgs.deinit();
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var session = session_mod.Session.init(allocator);
+    defer session.deinit();
+    var perm_ctx = perm.PermissionContext{};
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    defer cache.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    // Seed a user message
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Hi" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+        .max_turns = 5,
+    }, &msgs);
+    defer {
+        if (loop_iter.tool_exec) |*exec| exec.deinit();
+        loop_iter.text_buf.deinit(allocator);
+        loop_iter.tool_json_buf.deinit(allocator);
+    }
+
+    var iter = loop_iter.toEventIterator();
+
+    // Collect events
+    var saw_text = false;
+    var saw_result = false;
+    while (iter.next()) |event| {
+        switch (event) {
+            .stream_event => |delta| {
+                if (delta.text != null) saw_text = true;
+            },
+            .result => |r| {
+                saw_result = true;
+                try std.testing.expect(!r.is_error);
+                try std.testing.expectEqualStrings("success", r.subtype);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_text);
+    try std.testing.expect(saw_result);
+}
+
+test "queryLoop dispatches tool calls with MockProvider" {
+    // Use an arena because the query loop's tool-input JSON parsing intentionally
+    // keeps the Parsed arena alive (tool inputs reference it).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const testing_mod = @import("testing.zig");
+
+    // Simulate: model calls FakeTool, then produces a final text response
+    const turn1_deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .content_block_start, .tool_use_id = "t1", .tool_name = "FakeTool" },
+        .{ .@"type" = .tool_use_delta, .partial_json = "{}" },
+        .{ .@"type" = .content_block_stop },
+        .{ .@"type" = .message_stop },
+    };
+    const turn2_deltas = [_]streaming_events.StreamDelta{
+        .{ .@"type" = .message_start },
+        .{ .@"type" = .text_delta, .text = "Done!" },
+        .{ .@"type" = .message_stop },
+    };
+    var mock = testing_mod.MockProvider.init(allocator, &.{
+        .{ .deltas = &turn1_deltas },
+        .{ .deltas = &turn2_deltas },
+    });
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    var session = session_mod.Session.init(allocator);
+    var perm_ctx = perm.PermissionContext{ .mode = .bypass };
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    var reg = tools_reg.ToolRegistry.init(allocator);
+
+    var fake = testing_mod.FakeTool{};
+    const fake_tool = @import("tool.zig").buildTool(testing_mod.FakeTool, &fake);
+    try reg.register(fake_tool);
+
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Call FakeTool" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+        .max_turns = 10,
+    }, &msgs);
+
+    var iter = loop_iter.toEventIterator();
+
+    var saw_done_text = false;
+    var saw_result = false;
+    while (iter.next()) |event| {
+        switch (event) {
+            .stream_event => |delta| {
+                if (delta.text) |t| {
+                    if (std.mem.eql(u8, t, "Done!")) saw_done_text = true;
+                }
+            },
+            .result => |r| {
+                saw_result = true;
+                try std.testing.expect(!r.is_error);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_done_text);
+    try std.testing.expect(saw_result);
+    try std.testing.expectEqual(@as(u32, 1), fake.call_count);
+}
+
+test "queryLoop yields provider error" {
+    const allocator = std.testing.allocator;
+    const testing_mod = @import("testing.zig");
+
+    // Empty responses → ServerError on first call
+    var mock = testing_mod.MockProvider.init(allocator, &.{});
+    var provider_iface = mock.provider();
+
+    var msgs = message_mod.MessageStore.init(allocator);
+    defer msgs.deinit();
+    var abort = abort_mod.AbortController{};
+    var hooks = hook_mod.HookRunner.init(allocator);
+    defer hooks.deinit();
+    var session = session_mod.Session.init(allocator);
+    defer session.deinit();
+    var perm_ctx = perm.PermissionContext{};
+    var cache = file_cache_mod.FileStateCache.init(allocator, 10, 1024);
+    defer cache.deinit();
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+    var sw = @import("context/sliding_window.zig").SlidingWindowStrategy.init(20);
+    var strategy = sw.strategy();
+
+    const text_block = try msgs.allocator().alloc(message_mod.ContentBlock, 1);
+    text_block[0] = .{ .text = "Hi" };
+    try msgs.append(.{ .user = .{ .header = message_mod.Header.init(), .content = text_block } });
+
+    var loop_iter = queryLoop(.{
+        .allocator = allocator,
+        .provider = &provider_iface,
+        .tool_registry = &reg,
+        .permission_ctx = &perm_ctx,
+        .hook_runner = &hooks,
+        .session = &session,
+        .abort = &abort,
+        .context_strategy = &strategy,
+        .file_cache = &cache,
+    }, &msgs);
+    defer {
+        if (loop_iter.tool_exec) |*exec| exec.deinit();
+        loop_iter.text_buf.deinit(allocator);
+        loop_iter.tool_json_buf.deinit(allocator);
+    }
+
+    var iter = loop_iter.toEventIterator();
+    const event = iter.next().?;
+    try std.testing.expectEqualStrings("error_server", event.result.subtype);
 }
 
 test "queryLoop yields error on abort" {

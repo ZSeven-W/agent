@@ -276,3 +276,70 @@ test "MessageStore append and count" {
 
     try std.testing.expectEqual(@as(usize, 1), store.count());
 }
+
+test "MessageStore items returns all messages" {
+    const allocator = std.testing.allocator;
+    var store = MessageStore.init(allocator);
+    defer store.deinit();
+
+    try store.append(.{ .system = .{ .header = Header.init(), .content = "sys" } });
+    try store.append(.{ .tombstone = .{ .header = Header.init() } });
+    try store.append(.{ .system = .{ .header = Header.init(), .content = "sys2" } });
+
+    const items = store.items();
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("sys", items[0].system.content);
+    try std.testing.expectEqualStrings("sys2", items[2].system.content);
+}
+
+test "MessageStore allocator returns arena allocator" {
+    const allocator = std.testing.allocator;
+    var store = MessageStore.init(allocator);
+    defer store.deinit();
+
+    // Use the store's arena allocator to create content
+    const arena_alloc = store.allocator();
+    const text = try arena_alloc.dupe(u8, "hello from arena");
+    const content = try arena_alloc.alloc(ContentBlock, 1);
+    content[0] = .{ .text = text };
+
+    try store.append(.{ .user = .{
+        .header = Header.init(),
+        .content = content,
+    } });
+
+    const items = store.items();
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("hello from arena", items[0].user.content[0].text);
+}
+
+test "Header parent_tool_use_id" {
+    var h = Header.init();
+    try std.testing.expectEqual(@as(?[]const u8, null), h.parent_tool_use_id);
+    h.parent_tool_use_id = "toolu_abc123";
+    try std.testing.expectEqualStrings("toolu_abc123", h.parent_tool_use_id.?);
+}
+
+test "Message getHeader works for all variants" {
+    const user_msg = Message{ .user = .{
+        .header = Header.init(),
+        .content = &.{},
+    } };
+    const assistant_msg = Message{ .assistant = .{
+        .header = Header.init(),
+        .content = &.{},
+    } };
+    const progress_msg = Message{ .progress = .{
+        .header = Header.init(),
+        .tool_use_id = "t1",
+        .data = .null,
+    } };
+
+    // All variants should return valid headers
+    try std.testing.expect(user_msg.getHeader().timestamp > 0);
+    try std.testing.expect(assistant_msg.getHeader().timestamp > 0);
+    try std.testing.expect(progress_msg.getHeader().timestamp > 0);
+
+    // Each should have its own UUID
+    try std.testing.expect(!uuid_mod.eql(user_msg.getHeader().uuid, assistant_msg.getHeader().uuid));
+}

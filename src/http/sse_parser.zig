@@ -25,6 +25,18 @@ pub const SseParser = struct {
         try self.buffer.appendSlice(self.allocator, chunk);
     }
 
+    /// Match `name:` or `name: ` at the start of a line and return the value.
+    /// Returns null when the line doesn't carry that field. Accepts both
+    /// "field:value" (no space) and "field: value" (single space) forms,
+    /// per the SSE spec where the leading space after the colon is optional.
+    fn parseField(line: []const u8, comptime name: []const u8) ?[]const u8 {
+        const prefix = name ++ ":";
+        if (!std.mem.startsWith(u8, line, prefix)) return null;
+        var rest = line[prefix.len..];
+        if (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+        return rest;
+    }
+
     /// Try to extract next complete SSE event from buffer.
     /// Caller owns ALL returned slices (event, data, id) — free with allocator.
     pub fn next(self: *SseParser) ?SseEvent {
@@ -39,13 +51,17 @@ pub const SseParser = struct {
 
         var lines = std.mem.splitScalar(u8, raw, '\n');
         while (lines.next()) |line| {
-            if (std.mem.startsWith(u8, line, "event: ")) {
-                event_type = line["event: ".len..];
-            } else if (std.mem.startsWith(u8, line, "data: ")) {
+            // Per the SSE spec the single space after the colon is optional.
+            // Anthropic's official endpoint emits "event: foo" but Aliyun's
+            // /apps/anthropic adapter emits "event:foo" — accept both, else
+            // every Aliyun event is silently dropped and the stream looks empty.
+            if (parseField(line, "event")) |value| {
+                event_type = value;
+            } else if (parseField(line, "data")) |value| {
                 if (data.items.len > 0) data.appendSlice(self.allocator, "\n") catch {};
-                data.appendSlice(self.allocator, line["data: ".len..]) catch {};
-            } else if (std.mem.startsWith(u8, line, "id: ")) {
-                id = line["id: ".len..];
+                data.appendSlice(self.allocator, value) catch {};
+            } else if (parseField(line, "id")) |value| {
+                id = value;
             }
         }
 
@@ -118,4 +134,30 @@ test "SseParser handles multiple events in one chunk" {
     const e2 = parser.next().?;
     defer allocator.free(e2.data);
     try std.testing.expectEqualStrings("second", e2.data);
+}
+
+test "SseParser parses field lines without a space after the colon (Aliyun adapter format)" {
+    const allocator = std.testing.allocator;
+    var parser = SseParser.init(allocator);
+    defer parser.deinit();
+
+    try parser.feed("event:message_start\ndata:{\"type\":\"message_start\"}\n\n");
+    const event = parser.next().?;
+    defer allocator.free(event.data);
+    defer allocator.free(event.event.?);
+    try std.testing.expectEqualStrings("message_start", event.event.?);
+    try std.testing.expectEqualStrings("{\"type\":\"message_start\"}", event.data);
+}
+
+test "SseParser tolerates a mix of spaced and unspaced field lines in one event" {
+    const allocator = std.testing.allocator;
+    var parser = SseParser.init(allocator);
+    defer parser.deinit();
+
+    try parser.feed("event:content_block_delta\ndata: {\"delta\":\"hi\"}\n\n");
+    const event = parser.next().?;
+    defer allocator.free(event.data);
+    defer allocator.free(event.event.?);
+    try std.testing.expectEqualStrings("content_block_delta", event.event.?);
+    try std.testing.expectEqualStrings("{\"delta\":\"hi\"}", event.data);
 }

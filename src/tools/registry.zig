@@ -237,3 +237,70 @@ test "ToolRegistry allSchemas returns empty for empty registry" {
     const schemas = try reg.allSchemas(allocator);
     try std.testing.expectEqual(@as(usize, 0), schemas.len);
 }
+
+test "ToolRegistry replace updates existing tool" {
+    const allocator = std.testing.allocator;
+    var reg = ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    var impl1 = @import("../tool.zig").TestTool{};
+    const tool1 = @import("../tool.zig").buildTool(@import("../tool.zig").TestTool, &impl1);
+
+    try reg.register(tool1);
+    try std.testing.expectEqual(@as(usize, 1), reg.count());
+
+    // Replace with a different impl pointer (same name)
+    var impl2 = @import("../tool.zig").TestTool{};
+    const tool2 = @import("../tool.zig").buildTool(@import("../tool.zig").TestTool, &impl2);
+    try reg.replace(tool2);
+
+    try std.testing.expectEqual(@as(usize, 1), reg.count());
+    // The new tool should reference impl2's address
+    const found = reg.get("TestTool").?;
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&impl2)), found.ptr);
+}
+
+test "ToolRegistry replace rejects unknown tool" {
+    const allocator = std.testing.allocator;
+    var reg = ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    var impl = @import("../tool.zig").TestTool{};
+    const tool = @import("../tool.zig").buildTool(@import("../tool.zig").TestTool, &impl);
+
+    try std.testing.expectError(error.ToolNotFound, reg.replace(tool));
+}
+
+test "ToolRegistry listNames returns tool names" {
+    const allocator = std.testing.allocator;
+    var reg = ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    var impl = @import("../tool.zig").TestTool{};
+    const tool = @import("../tool.zig").buildTool(@import("../tool.zig").TestTool, &impl);
+    try reg.register(tool);
+
+    const names = try reg.listNames(allocator);
+    defer allocator.free(names);
+
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings("TestTool", names[0]);
+}
+
+test "ToolRegistry listNames returns empty for empty registry" {
+    const allocator = std.testing.allocator;
+    var reg = ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    const names = try reg.listNames(allocator);
+    defer allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 0), names.len);
+}
+
+test "ToolRegistry get returns null for unknown tool" {
+    const allocator = std.testing.allocator;
+    var reg = ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    try std.testing.expectEqual(@as(?Tool, null), reg.get("NonExistent"));
+}

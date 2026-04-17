@@ -188,3 +188,21 @@ test "SubAgent context has correct agent id" {
     try std.testing.expectEqual(@as(u8, '-'), agent_id[13]);
     try std.testing.expectEqual(@as(u8, '4'), agent_id[14]);
 }
+
+test "SubAgent seedMessages adds to engine" {
+    const allocator = std.testing.allocator;
+    var reg = tools_reg.ToolRegistry.init(allocator);
+    defer reg.deinit();
+
+    var sa = try SubAgent.init(.{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &reg,
+    });
+    defer sa.deinit();
+
+    try sa.seedMessages(
+        \\[{"role":"user","content":"prior context"},{"role":"assistant","content":"understood"}]
+    );
+    try std.testing.expectEqual(@as(usize, 2), sa.messageCount());
+}

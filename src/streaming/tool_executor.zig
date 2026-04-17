@@ -123,3 +123,53 @@ test "StreamingToolExecutor add and complete in order" {
     // No more
     try std.testing.expectEqual(@as(?*TrackedTool, null), exec.nextCompleted());
 }
+
+test "StreamingToolExecutor fail marks tool with error" {
+    const allocator = std.testing.allocator;
+    var exec = StreamingToolExecutor.init(allocator);
+    defer exec.deinit();
+
+    const uuid = @import("../uuid.zig").v4();
+    try exec.addTool(.{ .id = "t1", .name = "BadTool", .input = .null }, uuid);
+
+    exec.fail("t1", "permission denied");
+
+    const completed = exec.nextCompleted().?;
+    try std.testing.expectEqualStrings("t1", completed.block.id);
+    try std.testing.expectEqual(@as(?tool_mod.ToolResult, null), completed.result);
+    try std.testing.expectEqualStrings("permission denied", completed.error_message.?);
+}
+
+test "StreamingToolExecutor discard aborts sibling controller" {
+    const allocator = std.testing.allocator;
+    var exec = StreamingToolExecutor.init(allocator);
+    defer exec.deinit();
+
+    try std.testing.expect(!exec.sibling_abort.isAborted());
+    exec.discard();
+    try std.testing.expect(exec.sibling_abort.isAborted());
+}
+
+test "StreamingToolExecutor pendingCount tracks correctly" {
+    const allocator = std.testing.allocator;
+    var exec = StreamingToolExecutor.init(allocator);
+    defer exec.deinit();
+
+    const uuid = @import("../uuid.zig").v4();
+    try std.testing.expectEqual(@as(usize, 0), exec.pendingCount());
+
+    try exec.addTool(.{ .id = "a", .name = "A", .input = .null }, uuid);
+    try exec.addTool(.{ .id = "b", .name = "B", .input = .null }, uuid);
+    try std.testing.expectEqual(@as(usize, 2), exec.pendingCount());
+
+    exec.complete("a", .{ .data = .null });
+    // a is completed but not yet yielded
+    try std.testing.expectEqual(@as(usize, 2), exec.pendingCount());
+
+    _ = exec.nextCompleted(); // yield a
+    try std.testing.expectEqual(@as(usize, 1), exec.pendingCount());
+
+    exec.complete("b", .{ .data = .null });
+    _ = exec.nextCompleted(); // yield b
+    try std.testing.expectEqual(@as(usize, 0), exec.pendingCount());
+}
