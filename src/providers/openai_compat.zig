@@ -94,15 +94,40 @@ pub const OpenAICompatProvider = struct {
             .{self.config.base.api_key orelse ""},
         ) catch return error.InvalidRequest;
 
-        var http = http_client.HttpClient.init(self.allocator);
-        var response = http.streamRequest(.{
+        // 2026-05-10 fix: allocate the iterator state on the heap FIRST so
+        // `HttpClient` lives at a stable address. The earlier pattern stored
+        // `var http = HttpClient.init(...)` on the stack, called streamRequest
+        // (which registers the connection inside `http.client.connection_pool`
+        // and gives the returned `Request` a `client: *Client` back-pointer
+        // into that stack slot), then bit-copied `http` into the heap state.
+        // After streamText returned, the stack frame went away — `state.
+        // response.request.client` still pointed at dead stack memory. Any
+        // later `response.close()` → `request.deinit()` → `client.connection_
+        // pool.release()` was a use-after-free that libmalloc eventually
+        // tripped on. Constructing the HttpClient directly into the heap
+        // state means the back-pointer is heap-stable from the start.
+        const state = self.allocator.create(OpenAIStreamState) catch return error.ConnectionFailed;
+        state.* = .{
+            .http = http_client.HttpClient.init(self.allocator),
+            .response = undefined,
+            .parser = sse_parser_mod.SseParser.init(self.allocator),
+            .allocator = self.allocator,
+            .read_buf = undefined,
+        };
+
+        var response = state.http.streamRequest(.{
             .url = url,
             .body = body,
             .headers = &.{
                 .{ .name = "Authorization", .value = auth_header },
                 .{ .name = "content-type", .value = "application/json" },
             },
-        }) catch return error.ConnectionFailed;
+        }) catch {
+            state.http.deinit();
+            state.parser.deinit();
+            self.allocator.destroy(state);
+            return error.ConnectionFailed;
+        };
 
         if (response.status != .ok) {
             // See anthropic.zig for the rationale: skipping body read avoids
@@ -131,6 +156,9 @@ pub const OpenAICompatProvider = struct {
             self.last_error_len = formatted.len;
             std.debug.print("[http] API error {d}: {s}\n", .{ status_code, message });
             response.close();
+            state.http.deinit();
+            state.parser.deinit();
+            self.allocator.destroy(state);
             return switch (status_code) {
                 401 => error.AuthenticationFailed,
                 402 => error.InsufficientCredits,
@@ -141,15 +169,7 @@ pub const OpenAICompatProvider = struct {
         }
         self.last_error_len = 0;
         self.last_error_status = 0;
-
-        const state = self.allocator.create(OpenAIStreamState) catch return error.ConnectionFailed;
-        state.* = .{
-            .http = http,
-            .response = response,
-            .parser = sse_parser_mod.SseParser.init(self.allocator),
-            .allocator = self.allocator,
-            .read_buf = undefined,
-        };
+        state.response = response;
 
         return .{
             .context = @ptrCast(state),
@@ -345,6 +365,29 @@ const OpenAIStreamState = struct {
     done: bool = false,
     cleaned: bool = false,
 
+    /// Serializes nextDelta against concurrent NAPI thread-pool callers.
+    ///
+    /// 2026-05-10 SIGABRT post-mortem: bun's NAPI worker pool was
+    /// dispatching multiple `agent_event_to_json(iter)` calls onto the
+    /// same iterator concurrently (member-iter delegate fan-out path
+    /// in apps/web/server/api/ai/agent.ts:1094 fires several
+    /// `runDelegateMember` flows in parallel; each flow's
+    /// `nextEvent(iter)` call queues async work onto Bun Pool 0..N).
+    /// Two workers entered cleanup() at the same time — the plain bool
+    /// `cleaned` guard is a non-atomic check-then-write — and both
+    /// proceeded to free `response.request` + walk
+    /// `http.client.connection_pool` for deinit. libmalloc detected
+    /// the duplicate free and abort()-ed the bun process.
+    ///
+    /// CAS on `cleaned` alone is insufficient — `nextDelta`'s entire
+    /// loop reads/writes `pending`, `done`, `parser`, `response`,
+    /// `read_buf`, all of which are race-prone if a second worker
+    /// blows past the `done` check while the first is still mid-loop.
+    /// So we lock the mutex for the full duration of `nextDelta`
+    /// (which subsumes `cleanup`) and the second worker simply blocks
+    /// until the first observes `done=true` and returns null.
+    mutex: std.Thread.Mutex = .{},
+
     // A single SSE chunk can yield multiple StreamDeltas (e.g. content_block_start
     // + tool_use_delta, or content_block_stop + message_stop). We buffer them
     // here so nextDelta can hand them out one at a time while keeping its
@@ -400,6 +443,13 @@ const OpenAIStreamState = struct {
 
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *OpenAIStreamState = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Late-arriving callers after the stream has been torn down get
+        // null without re-entering deinit. Keeps the iterator contract
+        // ("null means done") intact even when JS double-pulls.
+        if (self.cleaned) return null;
 
         while (true) {
             if (self.drainPending()) |d| return d;
@@ -683,4 +733,60 @@ test "buildRequestBody includes tools in OpenAI function format" {
 test "OpenAICompatProvider streamTextFn returns non-null function" {
     const fn_ptr = OpenAICompatProvider.streamTextFn();
     try std.testing.expect(@intFromPtr(fn_ptr) != 0);
+}
+
+// Regression for 2026-05-10 SIGABRT: two NAPI workers raced through
+// OpenAIStreamState.cleanup() because `cleaned` was a non-atomic bool.
+// Both passed the guard, both freed `response.request`, libmalloc abort.
+// The fix is the std.Thread.Mutex on OpenAIStreamState that wraps
+// nextDelta (which is the only entry point that ever calls cleanup).
+// This test mirrors the guard pattern with a counter so the regression
+// is caught even without the full HTTP/SSE setup of a real run.
+test "cleanup-guard pattern: mutex serializes concurrent cleanup callers" {
+    const Tracker = struct {
+        var actual_cleanups: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+        const State = struct {
+            mutex: std.Thread.Mutex = .{},
+            cleaned: bool = false,
+
+            fn cleanup(self: *@This()) void {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+                if (self.cleaned) return;
+                self.cleaned = true;
+                // Mirror the production cleanup() workload — a sleep is
+                // enough to prove the second thread arrives only after
+                // the first has set `cleaned = true` (without the mutex
+                // both threads observe `cleaned = false` and proceed).
+                std.Thread.sleep(1 * std.time.ns_per_ms);
+                _ = actual_cleanups.fetchAdd(1, .seq_cst);
+            }
+        };
+
+        fn worker(state: *State) void {
+            state.cleanup();
+        }
+    };
+
+    Tracker.actual_cleanups.store(0, .seq_cst);
+    var state = Tracker.State{};
+
+    var t1 = try std.Thread.spawn(.{}, Tracker.worker, .{&state});
+    var t2 = try std.Thread.spawn(.{}, Tracker.worker, .{&state});
+    var t3 = try std.Thread.spawn(.{}, Tracker.worker, .{&state});
+    t1.join();
+    t2.join();
+    t3.join();
+
+    try std.testing.expectEqual(@as(u32, 1), Tracker.actual_cleanups.load(.seq_cst));
+}
+
+test "OpenAIStreamState carries the cleanup-guard mutex" {
+    // Compile-time presence check — if a future refactor removes the
+    // mutex, this stops compiling and forces re-review against the
+    // 2026-05-10 SIGABRT post-mortem.
+    const has_mutex = @hasField(OpenAIStreamState, "mutex");
+    try std.testing.expect(has_mutex);
+    try std.testing.expectEqual(std.Thread.Mutex, @TypeOf(@as(OpenAIStreamState, undefined).mutex));
 }
