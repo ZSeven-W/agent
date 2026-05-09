@@ -71,8 +71,28 @@ pub const AnthropicProvider = struct {
         else
             std.fmt.allocPrint(self.allocator, "https://api.anthropic.com/v1/messages", .{}) catch return error.InvalidRequest;
 
-        var http = http_client.HttpClient.init(self.allocator);
-        var response = http.streamRequest(.{
+        // 2026-05-10 fix: allocate the iterator state on the heap FIRST so
+        // `HttpClient` lives at a stable address. The earlier pattern stored
+        // `var http = HttpClient.init(...)` on the stack, called streamRequest
+        // (which registers the connection inside `http.client.connection_pool`
+        // and gives the returned `Request` a `client: *Client` back-pointer
+        // into that stack slot), then bit-copied `http` into the heap state.
+        // After streamText returned, the stack frame went away — every
+        // subsequent `response.close()` → `request.deinit()` →
+        // `client.connection_pool.release()` walked dead stack memory.
+        // Mirror of the openai_compat fix; the same hazard applied here.
+        const state = self.allocator.create(AnthropicStreamState) catch return error.ConnectionFailed;
+        state.* = .{
+            .http = http_client.HttpClient.init(self.allocator),
+            .response = undefined,
+            .parser = sse_parser_mod.SseParser.init(self.allocator),
+            .allocator = self.allocator,
+            .read_buf = undefined,
+            .url = url,
+            .body = body,
+        };
+
+        var response = state.http.streamRequest(.{
             .url = url,
             .body = body,
             .headers = &.{
@@ -80,7 +100,14 @@ pub const AnthropicProvider = struct {
                 .{ .name = "anthropic-version", .value = "2023-06-01" },
                 .{ .name = "content-type", .value = "application/json" },
             },
-        }) catch return error.ConnectionFailed;
+        }) catch {
+            state.http.deinit();
+            state.parser.deinit();
+            self.allocator.free(state.url);
+            self.allocator.free(state.body);
+            self.allocator.destroy(state);
+            return error.ConnectionFailed;
+        };
 
         if (response.status != .ok) {
             // DO NOT call response.readChunk() here. The std.http body reader
@@ -101,6 +128,11 @@ pub const AnthropicProvider = struct {
             self.last_error_len = formatted.len;
             std.debug.print("[http] API error {d} (body skipped to avoid Reader panic)\n", .{status_code});
             response.close();
+            state.http.deinit();
+            state.parser.deinit();
+            self.allocator.free(state.url);
+            self.allocator.free(state.body);
+            self.allocator.destroy(state);
             return switch (status_code) {
                 401 => error.AuthenticationFailed,
                 429 => error.RateLimited,
@@ -111,17 +143,7 @@ pub const AnthropicProvider = struct {
         // doesn't report it after a subsequent success-then-failure pattern.
         self.last_error_len = 0;
         self.last_error_status = 0;
-
-        const state = self.allocator.create(AnthropicStreamState) catch return error.ConnectionFailed;
-        state.* = .{
-            .http = http,
-            .response = response,
-            .parser = sse_parser_mod.SseParser.init(self.allocator),
-            .allocator = self.allocator,
-            .read_buf = undefined,
-            .url = url,
-            .body = body,
-        };
+        state.response = response;
 
         return .{
             .context = @ptrCast(state),
@@ -182,8 +204,17 @@ const AnthropicStreamState = struct {
     done: bool = false,
     cleaned: bool = false,
 
+    /// See OpenAIStreamState.mutex — same SIGABRT-on-double-cleanup hazard
+    /// applies here. Two NAPI thread-pool workers driving the same iterator
+    /// would race the non-atomic `cleaned` guard, both deinit the
+    /// HttpClient, and libmalloc would abort the process. The mutex
+    /// serializes nextDelta so cleanup runs exactly once.
+    mutex: std.Thread.Mutex = .{},
+
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *AnthropicStreamState = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         if (self.done) {
             if (!self.cleaned) {
