@@ -93,13 +93,13 @@ pub fn build(b: *std.Build) void {
         };
         const gen_node_lib = b.addSystemCommand(&.{
             "zig", "dlltool",
-            "-m", dll_machine,
+            "-m",  dll_machine,
             "-d",
         });
-        gen_node_lib.addFileArg(b.path("napi/node_api.def"));
+        gen_node_lib.addFileArg2(b.path("napi/node_api.def"), .{});
         gen_node_lib.addArg("-l");
-        const node_import_lib = gen_node_lib.addOutputFileArg("libnode_api.a");
-        napi_lib.addObjectFile(node_import_lib);
+        const node_import_lib = gen_node_lib.addOutputFileArg2("libnode_api.a", .{});
+        bridge_module.addObjectFile(node_import_lib);
     }
     const napi_install = b.addInstallFileWithDir(
         napi_lib.getEmittedBin(),

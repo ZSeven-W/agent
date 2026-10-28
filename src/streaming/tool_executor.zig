@@ -22,7 +22,7 @@ pub const StreamingToolExecutor = struct {
 
     pub fn init(allocator: std.mem.Allocator) StreamingToolExecutor {
         return .{
-            .tracked = .{},
+            .tracked = .empty,
             .allocator = allocator,
         };
     }

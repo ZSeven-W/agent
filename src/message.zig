@@ -32,7 +32,7 @@ pub const Header = struct {
     pub fn init() Header {
         return .{
             .uuid = uuid_mod.v4(),
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = std.Io.Clock.real.now(uuid_mod.defaultIo()).toMilliseconds(),
         };
     }
 
@@ -176,12 +176,12 @@ pub const Message = union(enum) {
 /// into it) — anything else risks use-after-free on deinit.
 pub const MessageStore = struct {
     arena: std.heap.ArenaAllocator,
-    messages: std.ArrayListUnmanaged(Message),
+    messages: std.ArrayList(Message),
 
     pub fn init(gpa: std.mem.Allocator) MessageStore {
         return .{
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .messages = .{},
+            .messages = .empty,
         };
     }
 

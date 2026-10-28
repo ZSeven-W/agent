@@ -23,18 +23,18 @@ pub const AgentTask = struct {
 
     pub fn complete(self: *AgentTask) void {
         self.state = .completed;
-        self.completed_at = std.time.milliTimestamp();
+        self.completed_at = std.Io.Clock.real.now(uuid_mod.defaultIo()).toMilliseconds();
     }
 
     pub fn fail(self: *AgentTask, err: []const u8) void {
         self.state = .failed;
         self.error_message = err;
-        self.completed_at = std.time.milliTimestamp();
+        self.completed_at = std.Io.Clock.real.now(uuid_mod.defaultIo()).toMilliseconds();
     }
 
     pub fn kill(self: *AgentTask) void {
         self.state = .killed;
-        self.completed_at = std.time.milliTimestamp();
+        self.completed_at = std.Io.Clock.real.now(uuid_mod.defaultIo()).toMilliseconds();
     }
 };
 
@@ -65,7 +65,7 @@ pub const TaskManager = struct {
             .agent_id = agent_id,
             .prompt = prompt,
             .description = description,
-            .created_at = std.time.milliTimestamp(),
+            .created_at = std.Io.Clock.real.now(uuid_mod.defaultIo()).toMilliseconds(),
         };
         try self.tasks.put(id, task);
         return task;

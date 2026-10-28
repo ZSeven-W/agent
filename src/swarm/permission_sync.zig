@@ -34,13 +34,14 @@ pub const PermissionSync = struct {
     /// Initialise a PermissionSync for `team_name`.
     /// Creates `~/.claude/teams/{team}/permissions/{pending,resolved}` if needed.
     pub fn init(allocator: std.mem.Allocator, team_name: []const u8) !PermissionSync {
-        const home = std.posix.getenv("HOME") orelse "/tmp";
+        const io = uuid_mod.defaultIo();
+        const home = uuid_mod.getEnv("HOME") orelse "/tmp";
         const base = try std.fmt.allocPrint(allocator, "{s}/.claude/teams/{s}/permissions", .{ home, team_name });
         errdefer allocator.free(base);
 
-        // Ensure directory tree exists using makePath (mirrors mailbox.zig pattern).
-        var root = try std.fs.openDirAbsolute("/", .{});
-        defer root.close();
+        // Ensure directory tree exists using createDirPath (mirrors mailbox.zig pattern).
+        var root = try std.Io.Dir.openDirAbsolute(io, "/", .{});
+        defer root.close(io);
 
         const pending = try std.fmt.allocPrint(allocator, "{s}/pending", .{base});
         defer allocator.free(pending);
@@ -48,12 +49,12 @@ pub const PermissionSync = struct {
         defer allocator.free(resolved);
 
         const pending_rel = if (pending.len > 0 and pending[0] == '/') pending[1..] else pending;
-        root.makePath(pending_rel) catch |e| switch (e) {
+        root.createDirPath(io, pending_rel) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         const resolved_rel = if (resolved.len > 0 and resolved[0] == '/') resolved[1..] else resolved;
-        root.makePath(resolved_rel) catch |e| switch (e) {
+        root.createDirPath(io, resolved_rel) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -72,11 +73,12 @@ pub const PermissionSync = struct {
         const resolved = try std.fmt.allocPrint(allocator, "{s}/resolved", .{base_path});
         defer allocator.free(resolved);
 
-        std.fs.makeDirAbsolute(pending) catch |e| switch (e) {
+        const io = uuid_mod.defaultIo();
+        std.Io.Dir.createDirAbsolute(io, pending, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
-        std.fs.makeDirAbsolute(resolved) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(io, resolved, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -169,9 +171,10 @@ pub const PermissionSync = struct {
         , .{ esc_id, esc_worker_id, esc_worker_name, esc_team_name, esc_tool_name, esc_tool_use_id, esc_description, req.created_at });
         defer self.allocator.free(content);
 
-        const file = try std.fs.createFileAbsolute(path, .{});
-        defer file.close();
-        try file.writeAll(content);
+        const io = uuid_mod.defaultIo();
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
     }
 
     /// Write a permission response to resolved/.
@@ -197,9 +200,10 @@ pub const PermissionSync = struct {
         , .{ esc_request_id, decision_str });
         defer self.allocator.free(content);
 
-        const file = try std.fs.createFileAbsolute(path, .{});
-        defer file.close();
-        try file.writeAll(content);
+        const io = uuid_mod.defaultIo();
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
     }
 
     /// Poll for a response to a specific request.
@@ -214,17 +218,12 @@ pub const PermissionSync = struct {
         const resolved_path = try std.fmt.allocPrint(self.allocator, "{s}/resolved/{s}.json", .{ self.base_path, request_id });
         defer self.allocator.free(resolved_path);
 
-        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-        while (std.time.milliTimestamp() < deadline) {
+        const io = uuid_mod.defaultIo();
+        const deadline = std.Io.Clock.real.now(io).toMilliseconds() + @as(i64, @intCast(timeout_ms));
+        while (std.Io.Clock.real.now(io).toMilliseconds() < deadline) {
             if (abort.load(.acquire)) return null;
 
-            if (std.fs.openFileAbsolute(resolved_path, .{})) |file| {
-                defer file.close();
-                // File exists — read and parse the decision.
-                const content = file.readToEndAlloc(self.allocator, 64 * 1024) catch {
-                    std.Thread.sleep(500 * std.time.ns_per_ms);
-                    continue;
-                };
+            if (std.Io.Dir.cwd().readFileAlloc(io, resolved_path, self.allocator, .limited(64 * 1024))) |content| {
                 defer self.allocator.free(content);
 
                 // Simple decision parsing — look for "approved" or "rejected".
@@ -237,7 +236,7 @@ pub const PermissionSync = struct {
                 };
             } else |_| {}
 
-            std.Thread.sleep(500 * std.time.ns_per_ms);
+            io.sleep(.fromMilliseconds(500), .awake) catch {};
         }
         return null;
     }
@@ -252,7 +251,7 @@ test "PermissionSync initWithPath creates directory structure" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -266,10 +265,10 @@ test "PermissionSync initWithPath creates directory structure" {
     const resolved_path = try std.fmt.allocPrint(allocator, "{s}/resolved", .{path});
     defer allocator.free(resolved_path);
 
-    var pending_dir = try std.fs.openDirAbsolute(pending_path, .{});
-    pending_dir.close();
-    var resolved_dir = try std.fs.openDirAbsolute(resolved_path, .{});
-    resolved_dir.close();
+    var pending_dir = try std.Io.Dir.openDirAbsolute(std.testing.io, pending_path, .{});
+    pending_dir.close(std.testing.io);
+    var resolved_dir = try std.Io.Dir.openDirAbsolute(std.testing.io, resolved_path, .{});
+    resolved_dir.close(std.testing.io);
 }
 
 test "PermissionSync writeRequest creates pending JSON file" {
@@ -277,7 +276,7 @@ test "PermissionSync writeRequest creates pending JSON file" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -296,7 +295,7 @@ test "PermissionSync writeRequest creates pending JSON file" {
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/pending/req-001.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"id\":\"req-001\"") != null);
@@ -312,7 +311,7 @@ test "PermissionSync writeRequest escapes special characters" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -331,7 +330,7 @@ test "PermissionSync writeRequest escapes special characters" {
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/pending/req-esc.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     // Newline should be escaped.
@@ -345,7 +344,7 @@ test "PermissionSync writeResponse creates resolved JSON file (approved)" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -358,7 +357,7 @@ test "PermissionSync writeResponse creates resolved JSON file (approved)" {
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/resolved/req-001.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"request_id\":\"req-001\"") != null);
@@ -370,7 +369,7 @@ test "PermissionSync writeResponse creates resolved JSON file (rejected with fee
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -384,7 +383,7 @@ test "PermissionSync writeResponse creates resolved JSON file (rejected with fee
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/resolved/req-002.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"decision\":\"rejected\"") != null);
@@ -396,7 +395,7 @@ test "PermissionSync pollResponse returns null on timeout" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -412,7 +411,7 @@ test "PermissionSync pollResponse returns null on abort" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);
@@ -428,7 +427,7 @@ test "PermissionSync pollResponse finds response after writeResponse" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var sync = try PermissionSync.initWithPath(allocator, path);

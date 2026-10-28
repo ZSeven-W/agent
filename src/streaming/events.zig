@@ -209,7 +209,7 @@ pub const EventBuffer = struct {
     pub fn init(allocator: std.mem.Allocator) EventBuffer {
         return .{
             .allocator = allocator,
-            .events = .{},
+            .events = .empty,
         };
     }
 
@@ -324,7 +324,7 @@ test "EventBuffer handles stream_event and tool_progress" {
     defer buf.deinit();
 
     try buf.push(Event{ .stream_event = StreamDelta{
-        .@"type" = .text_delta,
+        .type = .text_delta,
         .text = "hello",
     } });
     try buf.push(Event{ .tool_progress = ToolProgress{
@@ -348,7 +348,7 @@ test "EventBuffer handles stream_event and tool_progress" {
 }
 
 test "StreamDelta defaults" {
-    const delta = StreamDelta{ .@"type" = .message_start };
+    const delta = StreamDelta{ .type = .message_start };
     try std.testing.expectEqual(@as(u32, 0), delta.index);
     try std.testing.expectEqual(@as(?[]const u8, null), delta.text);
     try std.testing.expectEqual(@as(?[]const u8, null), delta.tool_use_id);

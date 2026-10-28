@@ -1,17 +1,40 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+var global_threaded: std.Io.Threaded = blk: {
+    var t: std.Io.Threaded = .init_single_threaded;
+    t.allocator = std.heap.page_allocator;
+    break :blk t;
+};
+
+pub fn defaultIo() std.Io {
+    if (builtin.is_test) return std.testing.io;
+    return global_threaded.io();
+}
+
+pub fn getEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (builtin.is_test) {
+        if (comptime builtin.target.os.tag == .windows) return null;
+        return std.testing.environ.getPosix(name);
+    }
+    if (comptime builtin.link_libc) {
+        if (std.c.getenv(name)) |ptr| return std.mem.span(ptr);
+    }
+    return null;
+}
 
 /// A UUID v4 string in the canonical format: "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
 pub const Uuid = [36]u8;
 
 /// Generate a random UUID v4.
 ///
-/// Uses `std.crypto.random.bytes` for 16 random bytes, then:
+/// Uses the `std.Io` random source for 16 random bytes, then:
 /// - Sets the version nibble (byte 6 high nibble = 4)
 /// - Sets the variant bits (byte 8 high 2 bits = 10)
 /// - Formats as lowercase hex with dashes at positions 8, 13, 18, 23
 pub fn v4() Uuid {
     var bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    defaultIo().random(&bytes);
 
     // Set version: high nibble of byte 6 = 0x4
     bytes[6] = (bytes[6] & 0x0f) | 0x40;

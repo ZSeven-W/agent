@@ -133,7 +133,7 @@ pub const OpenAICompatProvider = struct {
             // See anthropic.zig for the rationale: skipping body read avoids
             // a hard panic in std.http.Reader when the upstream uses chunked
             // transfer-encoding for error responses.
-            const status_code: u16 = @intFromEnum(response.status);
+            const status_code: u16 = @backingInt(response.status);
             self.last_error_status = status_code;
             const message: []const u8 = switch (status_code) {
                 401 => "Authentication failed (HTTP 401): check API key",
@@ -184,15 +184,15 @@ pub const OpenAICompatProvider = struct {
         tools: ?[]const types.ToolSchema,
         stream_config: types.StreamConfig,
     ) ![]const u8 {
-        var obj = std.json.ObjectMap.init(allocator);
-        try obj.put("model", .{ .string = config.base.model });
-        try obj.put("stream", .{ .bool = true });
-        try obj.put("max_tokens", .{ .integer = @intCast(stream_config.max_tokens) });
+        var obj: std.json.ObjectMap = .empty;
+        try obj.put(allocator, "model", .{ .string = config.base.model });
+        try obj.put(allocator, "stream", .{ .bool = true });
+        try obj.put(allocator, "max_tokens", .{ .integer = @intCast(stream_config.max_tokens) });
 
         if (config.quirks.supports_stream_options) {
-            var opts = std.json.ObjectMap.init(allocator);
-            try opts.put("include_usage", .{ .bool = true });
-            try obj.put("stream_options", .{ .object = opts });
+            var opts: std.json.ObjectMap = .empty;
+            try opts.put(allocator, "include_usage", .{ .bool = true });
+            try obj.put(allocator, "stream_options", .{ .object = opts });
         }
 
         var msgs_arr = std.json.Array.init(allocator);
@@ -200,9 +200,9 @@ pub const OpenAICompatProvider = struct {
         // Inject system prompt as the first message if the caller supplied one.
         if (stream_config.system_prompt) |sys| {
             if (sys.len > 0) {
-                var sys_obj = std.json.ObjectMap.init(allocator);
-                try sys_obj.put("role", .{ .string = "system" });
-                try sys_obj.put("content", .{ .string = sys });
+                var sys_obj: std.json.ObjectMap = .empty;
+                try sys_obj.put(allocator, "role", .{ .string = "system" });
+                try sys_obj.put(allocator, "content", .{ .string = sys });
                 try msgs_arr.append(.{ .object = sys_obj });
             }
         }
@@ -216,21 +216,21 @@ pub const OpenAICompatProvider = struct {
         for (messages) |msg| {
             try appendMessageAsOpenAI(allocator, &msgs_arr, msg);
         }
-        try obj.put("messages", .{ .array = msgs_arr });
+        try obj.put(allocator, "messages", .{ .array = msgs_arr });
 
         if (tools) |t| {
             var tools_arr = std.json.Array.init(allocator);
             for (t) |tool_schema| {
-                var tool_obj = std.json.ObjectMap.init(allocator);
-                var fn_obj = std.json.ObjectMap.init(allocator);
-                try fn_obj.put("name", .{ .string = tool_schema.name });
-                try fn_obj.put("description", .{ .string = tool_schema.description });
-                try fn_obj.put("parameters", tool_schema.input_schema);
-                try tool_obj.put("type", .{ .string = "function" });
-                try tool_obj.put("function", .{ .object = fn_obj });
+                var tool_obj: std.json.ObjectMap = .empty;
+                var fn_obj: std.json.ObjectMap = .empty;
+                try fn_obj.put(allocator, "name", .{ .string = tool_schema.name });
+                try fn_obj.put(allocator, "description", .{ .string = tool_schema.description });
+                try fn_obj.put(allocator, "parameters", tool_schema.input_schema);
+                try tool_obj.put(allocator, "type", .{ .string = "function" });
+                try tool_obj.put(allocator, "function", .{ .object = fn_obj });
                 try tools_arr.append(.{ .object = tool_obj });
             }
-            try obj.put("tools", .{ .array = tools_arr });
+            try obj.put(allocator, "tools", .{ .array = tools_arr });
         }
 
         return json_mod.stringify(allocator, .{ .object = obj });
@@ -250,18 +250,18 @@ fn appendMessageAsOpenAI(
 ) !void {
     // Plain string content is already OpenAI-compatible.
     if (msg.content == .string) {
-        var m = std.json.ObjectMap.init(allocator);
-        try m.put("role", .{ .string = msg.role });
-        try m.put("content", msg.content);
+        var m: std.json.ObjectMap = .empty;
+        try m.put(allocator, "role", .{ .string = msg.role });
+        try m.put(allocator, "content", msg.content);
         try msgs_arr.append(.{ .object = m });
         return;
     }
 
     if (msg.content != .array) {
         // Unknown shape — pass through unchanged so we don't silently drop it.
-        var m = std.json.ObjectMap.init(allocator);
-        try m.put("role", .{ .string = msg.role });
-        try m.put("content", msg.content);
+        var m: std.json.ObjectMap = .empty;
+        try m.put(allocator, "role", .{ .string = msg.role });
+        try m.put(allocator, "content", msg.content);
         try msgs_arr.append(.{ .object = m });
         return;
     }
@@ -270,7 +270,7 @@ fn appendMessageAsOpenAI(
     const is_assistant = std.mem.eql(u8, msg.role, "assistant");
 
     if (is_assistant) {
-        var text_buf: std.ArrayList(u8) = .{};
+        var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(allocator);
         var tool_calls = std.json.Array.init(allocator);
 
@@ -285,32 +285,32 @@ fn appendMessageAsOpenAI(
             } else if (std.mem.eql(u8, btype, "tool_use")) {
                 const id = json_mod.getString(block, "id") orelse "";
                 const name = json_mod.getString(block, "name") orelse "";
-                const input_val = block.object.get("input") orelse json_mod.JsonValue{ .object = std.json.ObjectMap.init(allocator) };
+                const input_val = block.object.get("input") orelse json_mod.JsonValue{ .object = .empty };
                 // OpenAI's function.arguments is a JSON-encoded string.
                 const args_str = json_mod.stringify(allocator, input_val) catch "{}";
 
-                var fn_obj = std.json.ObjectMap.init(allocator);
-                try fn_obj.put("name", .{ .string = name });
-                try fn_obj.put("arguments", .{ .string = args_str });
+                var fn_obj: std.json.ObjectMap = .empty;
+                try fn_obj.put(allocator, "name", .{ .string = name });
+                try fn_obj.put(allocator, "arguments", .{ .string = args_str });
 
-                var tc_obj = std.json.ObjectMap.init(allocator);
-                try tc_obj.put("id", .{ .string = id });
-                try tc_obj.put("type", .{ .string = "function" });
-                try tc_obj.put("function", .{ .object = fn_obj });
+                var tc_obj: std.json.ObjectMap = .empty;
+                try tc_obj.put(allocator, "id", .{ .string = id });
+                try tc_obj.put(allocator, "type", .{ .string = "function" });
+                try tc_obj.put(allocator, "function", .{ .object = fn_obj });
 
                 try tool_calls.append(.{ .object = tc_obj });
             }
             // thinking / unknown block types intentionally dropped.
         }
 
-        var m = std.json.ObjectMap.init(allocator);
-        try m.put("role", .{ .string = "assistant" });
+        var m: std.json.ObjectMap = .empty;
+        try m.put(allocator, "role", .{ .string = "assistant" });
 
         const content_str = try allocator.dupe(u8, text_buf.items);
-        try m.put("content", .{ .string = content_str });
+        try m.put(allocator, "content", .{ .string = content_str });
 
         if (tool_calls.items.len > 0) {
-            try m.put("tool_calls", .{ .array = tool_calls });
+            try m.put(allocator, "tool_calls", .{ .array = tool_calls });
         }
 
         try msgs_arr.append(.{ .object = m });
@@ -319,7 +319,7 @@ fn appendMessageAsOpenAI(
 
     // User role — tool_result blocks become standalone role="tool" messages;
     // text blocks get merged into a single trailing user message.
-    var text_buf: std.ArrayList(u8) = .{};
+    var text_buf: std.ArrayList(u8) = .empty;
     defer text_buf.deinit(allocator);
 
     for (blocks) |block| {
@@ -339,19 +339,19 @@ fn appendMessageAsOpenAI(
                 else => json_mod.stringify(allocator, content_val) catch "",
             };
 
-            var m = std.json.ObjectMap.init(allocator);
-            try m.put("role", .{ .string = "tool" });
-            try m.put("tool_call_id", .{ .string = tool_use_id });
-            try m.put("content", .{ .string = content_str });
+            var m: std.json.ObjectMap = .empty;
+            try m.put(allocator, "role", .{ .string = "tool" });
+            try m.put(allocator, "tool_call_id", .{ .string = tool_use_id });
+            try m.put(allocator, "content", .{ .string = content_str });
             try msgs_arr.append(.{ .object = m });
         }
     }
 
     if (text_buf.items.len > 0) {
         const content_str = try allocator.dupe(u8, text_buf.items);
-        var m = std.json.ObjectMap.init(allocator);
-        try m.put("role", .{ .string = "user" });
-        try m.put("content", .{ .string = content_str });
+        var m: std.json.ObjectMap = .empty;
+        try m.put(allocator, "role", .{ .string = "user" });
+        try m.put(allocator, "content", .{ .string = content_str });
         try msgs_arr.append(.{ .object = m });
     }
 }
@@ -386,7 +386,7 @@ const OpenAIStreamState = struct {
     /// So we lock the mutex for the full duration of `nextDelta`
     /// (which subsumes `cleanup`) and the second worker simply blocks
     /// until the first observes `done=true` and returns null.
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
 
     // A single SSE chunk can yield multiple StreamDeltas (e.g. content_block_start
     // + tool_use_delta, or content_block_stop + message_stop). We buffer them
@@ -435,7 +435,7 @@ const OpenAIStreamState = struct {
 
     fn closeOpenToolBlock(self: *OpenAIStreamState) void {
         if (self.has_open_tool_block) {
-            self.pushPending(.{ .@"type" = .content_block_stop });
+            self.pushPending(.{ .type = .content_block_stop });
             self.has_open_tool_block = false;
             self.current_tool_index = -1;
         }
@@ -443,8 +443,9 @@ const OpenAIStreamState = struct {
 
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *OpenAIStreamState = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = self.http.client.io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         // Late-arriving callers after the stream has been torn down get
         // null without re-entering deinit. Keeps the iterator contract
@@ -516,7 +517,7 @@ const OpenAIStreamState = struct {
                 if (json_mod.getString(delta_val, "content")) |text| {
                     if (text.len > 0) {
                         const owned = self.allocator.dupe(u8, text) catch null;
-                        self.pushPending(.{ .@"type" = .text_delta, .text = owned });
+                        self.pushPending(.{ .type = .text_delta, .text = owned });
                     }
                 }
 
@@ -531,12 +532,12 @@ const OpenAIStreamState = struct {
                 if (json_mod.getString(delta_val, "reasoning_content")) |text| {
                     if (text.len > 0) {
                         const owned = self.allocator.dupe(u8, text) catch null;
-                        self.pushPending(.{ .@"type" = .thinking_delta, .text = owned });
+                        self.pushPending(.{ .type = .thinking_delta, .text = owned });
                     }
                 } else if (json_mod.getString(delta_val, "reasoning")) |text| {
                     if (text.len > 0) {
                         const owned = self.allocator.dupe(u8, text) catch null;
-                        self.pushPending(.{ .@"type" = .thinking_delta, .text = owned });
+                        self.pushPending(.{ .type = .thinking_delta, .text = owned });
                     }
                 }
             }
@@ -545,7 +546,7 @@ const OpenAIStreamState = struct {
         if (choice.object.get("finish_reason")) |fr| {
             if (fr != .null) {
                 self.closeOpenToolBlock();
-                self.pushPending(.{ .@"type" = .message_stop });
+                self.pushPending(.{ .type = .message_stop });
                 self.done = true;
             }
         }
@@ -581,7 +582,7 @@ const OpenAIStreamState = struct {
             // block once we actually have a name to hand it.
             if (tool_name != null) {
                 self.pushPending(.{
-                    .@"type" = .content_block_start,
+                    .type = .content_block_start,
                     .tool_use_id = tool_id,
                     .tool_name = tool_name,
                 });
@@ -598,7 +599,7 @@ const OpenAIStreamState = struct {
                     if (av == .string and av.string.len > 0) {
                         const owned = self.allocator.dupe(u8, av.string) catch null;
                         self.pushPending(.{
-                            .@"type" = .tool_use_delta,
+                            .type = .tool_use_delta,
                             .partial_json = owned,
                         });
                     }
@@ -738,7 +739,7 @@ test "OpenAICompatProvider streamTextFn returns non-null function" {
 // Regression for 2026-05-10 SIGABRT: two NAPI workers raced through
 // OpenAIStreamState.cleanup() because `cleaned` was a non-atomic bool.
 // Both passed the guard, both freed `response.request`, libmalloc abort.
-// The fix is the std.Thread.Mutex on OpenAIStreamState that wraps
+// The fix is the std.Io.Mutex on OpenAIStreamState that wraps
 // nextDelta (which is the only entry point that ever calls cleanup).
 // This test mirrors the guard pattern with a counter so the regression
 // is caught even without the full HTTP/SSE setup of a real run.
@@ -747,19 +748,20 @@ test "cleanup-guard pattern: mutex serializes concurrent cleanup callers" {
         var actual_cleanups: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
         const State = struct {
-            mutex: std.Thread.Mutex = .{},
+            mutex: std.Io.Mutex = .init,
             cleaned: bool = false,
 
             fn cleanup(self: *@This()) void {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+                const io = std.testing.io;
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
                 if (self.cleaned) return;
                 self.cleaned = true;
                 // Mirror the production cleanup() workload — a sleep is
                 // enough to prove the second thread arrives only after
                 // the first has set `cleaned = true` (without the mutex
                 // both threads observe `cleaned = false` and proceed).
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+                io.sleep(.fromMilliseconds(1), .awake) catch {};
                 _ = actual_cleanups.fetchAdd(1, .seq_cst);
             }
         };
@@ -788,5 +790,5 @@ test "OpenAIStreamState carries the cleanup-guard mutex" {
     // 2026-05-10 SIGABRT post-mortem.
     const has_mutex = @hasField(OpenAIStreamState, "mutex");
     try std.testing.expect(has_mutex);
-    try std.testing.expectEqual(std.Thread.Mutex, @TypeOf(@as(OpenAIStreamState, undefined).mutex));
+    try std.testing.expectEqual(std.Io.Mutex, @TypeOf(@as(OpenAIStreamState, undefined).mutex));
 }

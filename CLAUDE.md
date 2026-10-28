@@ -20,7 +20,7 @@ zig build test         # Run all tests (unit via root.zig + e2e smoke test)
 zig build napi         # Build NAPI addon → zig-out/napi/agent_napi.node
 ```
 
-Minimum Zig version: **0.14.0**
+Minimum Zig version: **0.17.0**
 
 ## Architecture
 

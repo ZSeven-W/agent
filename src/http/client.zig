@@ -1,5 +1,5 @@
-// src/http/client.zig
 const std = @import("std");
+const uuid_mod = @import("../uuid.zig");
 
 pub const HttpRequest = struct {
     method: std.http.Method = .POST,
@@ -59,7 +59,7 @@ pub const HttpClient = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) HttpClient {
-        var client = std.http.Client{ .allocator = allocator };
+        var client = std.http.Client{ .allocator = allocator, .io = uuid_mod.defaultIo() };
         // Disable connection pooling — each request uses a fresh TCP connection.
         // Pooled connections from providers that silently close SSE streams cause
         // Bus errors and corrupted state on reuse.
@@ -86,7 +86,7 @@ pub const HttpClient = struct {
             return error.ConnectionFailed;
         };
 
-        var extra_headers: std.ArrayList(std.http.Header) = .{};
+        var extra_headers: std.ArrayList(std.http.Header) = .empty;
         defer extra_headers.deinit(self.allocator);
         for (req.headers) |h| {
             extra_headers.append(self.allocator, .{
@@ -139,7 +139,7 @@ pub const HttpClient = struct {
             std.debug.print("[http] receiveHead failed: {s}\n", .{@errorName(err)});
             return error.ConnectionFailed;
         };
-        std.debug.print("[http] response status: {d}\n", .{@intFromEnum(response.head.status)});
+        std.debug.print("[http] response status: {d}\n", .{@backingInt(response.head.status)});
 
         // Request-body preview logging is gated behind a runtime env
         // variable so prompt payloads (user input, conversation
@@ -158,12 +158,8 @@ pub const HttpClient = struct {
         // Do NOT read the response body — response.reader() panics
         // on some providers that send responses without proper
         // transfer encoding.
-        // std.posix.getenv is a compile error on Windows (env strings are
-        // WTF-16); use getEnvVarOwned instead and skip the opt-in on hosts
-        // that can't satisfy the lookup.
         const log_body_enabled = blk: {
-            const env = std.process.getEnvVarOwned(self.allocator, "OPENPENCIL_HTTP_LOG_REQUEST_BODY") catch break :blk false;
-            defer self.allocator.free(env);
+            const env = uuid_mod.getEnv("OPENPENCIL_HTTP_LOG_REQUEST_BODY") orelse break :blk false;
             break :blk env.len > 0 and env[0] != '0';
         };
         const should_log_body =

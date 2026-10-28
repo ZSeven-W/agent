@@ -30,7 +30,7 @@ A zero-dependency agent framework written in Zig that provides a complete runtim
 
 ### Install Zig
 
-Requires Zig **0.14.0** or later. Install from [ziglang.org/download](https://ziglang.org/download/).
+Requires Zig **0.17.0** or later. Install from [ziglang.org/download](https://ziglang.org/download/).
 
 ### Build
 

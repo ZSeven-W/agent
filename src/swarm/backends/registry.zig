@@ -4,6 +4,7 @@
 //! `which tmux` succeeds) > in_process (always available).
 
 const std = @import("std");
+const uuid_mod = @import("../../uuid.zig");
 
 pub const BackendType = enum {
     in_process,
@@ -19,18 +20,17 @@ pub const BackendRegistry = struct {
         if (self.cached) |c| return c;
 
         // Terminal multiplexer backends (iTerm2, tmux) only exist on
-        // Unix-like hosts. std.posix.getenv is also a compile error on
-        // Windows (env strings are WTF-16), so gate the whole lookup behind
-        // a comptime OS check.
-        if (comptime @import("builtin").os.tag != .windows) {
+        // Unix-like hosts, so gate the whole lookup behind a comptime OS
+        // check.
+        if (comptime @import("builtin").target.os.tag != .windows) {
             // iTerm2 — highest priority.
-            if (std.posix.getenv("ITERM_SESSION_ID") != null) {
+            if (uuid_mod.getEnv("ITERM_SESSION_ID") != null) {
                 self.cached = .iterm2;
                 return .iterm2;
             }
 
             // tmux — check env variable first.
-            if (std.posix.getenv("TMUX") != null) {
+            if (uuid_mod.getEnv("TMUX") != null) {
                 self.cached = .tmux;
                 return .tmux;
             }
@@ -55,26 +55,17 @@ pub const BackendRegistry = struct {
 
 /// Check whether `tmux` is available on PATH by running `which tmux`.
 fn tmuxBinaryExists() bool {
-    var child = std.process.Child.init(
-        &.{ "which", "tmux" },
-        std.heap.page_allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const io = uuid_mod.defaultIo();
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "which", "tmux" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
 
-    child.spawn() catch return false;
-
-    // Drain stdout/stderr so the child doesn't block.
-    if (child.stdout) |stdout| {
-        _ = stdout.readToEndAlloc(std.heap.page_allocator, 4096) catch {};
-    }
-    if (child.stderr) |stderr| {
-        _ = stderr.readToEndAlloc(std.heap.page_allocator, 4096) catch {};
-    }
-
-    const term = child.wait() catch return false;
+    const term = child.wait(io) catch return false;
     return switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
 }

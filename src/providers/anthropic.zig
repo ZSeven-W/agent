@@ -118,7 +118,7 @@ pub const AnthropicProvider = struct {
             // after EndOfStream and the state-union read is undefined.
             // We surface the status code only — losing the body text is the
             // acceptable tradeoff vs aborting the host process.
-            const status_code: u16 = @intFromEnum(response.status);
+            const status_code: u16 = @backingInt(response.status);
             self.last_error_status = status_code;
             const formatted = std.fmt.bufPrint(
                 &self.last_error_buf,
@@ -158,35 +158,35 @@ pub const AnthropicProvider = struct {
         tools: ?[]const types.ToolSchema,
         config: types.StreamConfig,
     ) ![]const u8 {
-        var obj = std.json.ObjectMap.init(allocator);
-        try obj.put("model", .{ .string = model });
-        try obj.put("stream", .{ .bool = true });
-        try obj.put("max_tokens", .{ .integer = @intCast(config.max_tokens) });
+        var obj: std.json.ObjectMap = .empty;
+        try obj.put(allocator, "model", .{ .string = model });
+        try obj.put(allocator, "stream", .{ .bool = true });
+        try obj.put(allocator, "max_tokens", .{ .integer = @intCast(config.max_tokens) });
 
         // Messages array
         var msgs_arr = std.json.Array.init(allocator);
         for (messages) |msg| {
-            var msg_obj = std.json.ObjectMap.init(allocator);
-            try msg_obj.put("role", .{ .string = msg.role });
-            try msg_obj.put("content", msg.content);
+            var msg_obj: std.json.ObjectMap = .empty;
+            try msg_obj.put(allocator, "role", .{ .string = msg.role });
+            try msg_obj.put(allocator, "content", msg.content);
             try msgs_arr.append(.{ .object = msg_obj });
         }
-        try obj.put("messages", .{ .array = msgs_arr });
+        try obj.put(allocator, "messages", .{ .array = msgs_arr });
 
         if (config.system_prompt) |sp| {
-            try obj.put("system", .{ .string = sp });
+            try obj.put(allocator, "system", .{ .string = sp });
         }
 
         if (tools) |t| {
             var tools_arr = std.json.Array.init(allocator);
             for (t) |tool_schema| {
-                var tool_obj = std.json.ObjectMap.init(allocator);
-                try tool_obj.put("name", .{ .string = tool_schema.name });
-                try tool_obj.put("description", .{ .string = tool_schema.description });
-                try tool_obj.put("input_schema", tool_schema.input_schema);
+                var tool_obj: std.json.ObjectMap = .empty;
+                try tool_obj.put(allocator, "name", .{ .string = tool_schema.name });
+                try tool_obj.put(allocator, "description", .{ .string = tool_schema.description });
+                try tool_obj.put(allocator, "input_schema", tool_schema.input_schema);
                 try tools_arr.append(.{ .object = tool_obj });
             }
-            try obj.put("tools", .{ .array = tools_arr });
+            try obj.put(allocator, "tools", .{ .array = tools_arr });
         }
 
         return json_mod.stringify(allocator, .{ .object = obj });
@@ -209,12 +209,13 @@ const AnthropicStreamState = struct {
     /// would race the non-atomic `cleaned` guard, both deinit the
     /// HttpClient, and libmalloc would abort the process. The mutex
     /// serializes nextDelta so cleanup runs exactly once.
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
 
     fn nextDelta(ctx: *anyopaque) ?types.StreamDelta {
         const self: *AnthropicStreamState = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = self.http.client.io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.done) {
             if (!self.cleaned) {
@@ -259,7 +260,7 @@ const AnthropicStreamState = struct {
             defer if (sse_event.event) |e| self.allocator.free(e);
             defer if (sse_event.id) |i| self.allocator.free(i);
             if (parseSseToStreamDelta(self.allocator, sse_event)) |delta| {
-                if (delta.@"type" == .message_stop) {
+                if (delta.type == .message_stop) {
                     self.done = true;
                 }
                 return delta;
@@ -277,13 +278,13 @@ const AnthropicStreamState = struct {
         };
 
         if (std.mem.eql(u8, event_type, "message_start")) {
-            return .{ .@"type" = .message_start };
+            return .{ .type = .message_start };
         } else if (std.mem.eql(u8, event_type, "content_block_start")) {
             // Parse content_block to detect tool_use blocks:
             // {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_xxx","name":"generate_design","input":{}}}
             const block_info = parseContentBlockStart(allocator, sse.data);
             return .{
-                .@"type" = .content_block_start,
+                .type = .content_block_start,
                 .tool_use_id = block_info.tool_use_id,
                 .tool_name = block_info.tool_name,
             };
@@ -292,13 +293,13 @@ const AnthropicStreamState = struct {
             // or thinking: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}
             // or tool input: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"..."}}
             const delta_info = parseDeltaJson(allocator, sse.data);
-            return .{ .@"type" = delta_info.delta_type, .text = delta_info.text, .partial_json = delta_info.partial_json };
+            return .{ .type = delta_info.delta_type, .text = delta_info.text, .partial_json = delta_info.partial_json };
         } else if (std.mem.eql(u8, event_type, "content_block_stop")) {
-            return .{ .@"type" = .content_block_stop };
+            return .{ .type = .content_block_stop };
         } else if (std.mem.eql(u8, event_type, "message_delta")) {
-            return .{ .@"type" = .message_delta };
+            return .{ .type = .message_delta };
         } else if (std.mem.eql(u8, event_type, "message_stop")) {
-            return .{ .@"type" = .message_stop };
+            return .{ .type = .message_stop };
         }
         return null;
     }

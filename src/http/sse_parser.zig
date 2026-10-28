@@ -14,7 +14,7 @@ pub const SseParser = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) SseParser {
-        return .{ .buffer = .{}, .allocator = allocator };
+        return .{ .buffer = .empty, .allocator = allocator };
     }
 
     pub fn deinit(self: *SseParser) void {
@@ -46,7 +46,7 @@ pub const SseParser = struct {
         const raw = buf[0..end];
 
         var event_type: ?[]const u8 = null;
-        var data: std.ArrayList(u8) = .{};
+        var data: std.ArrayList(u8) = .empty;
         var id: ?[]const u8 = null;
 
         var lines = std.mem.splitScalar(u8, raw, '\n');

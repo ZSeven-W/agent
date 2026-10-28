@@ -70,7 +70,7 @@ test "Swarm initWithMailboxPath creates all sub-components" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var s = try Swarm.initWithMailboxPath(.{
@@ -89,7 +89,7 @@ test "Swarm sendMessage delivers through mailbox" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var s = try Swarm.initWithMailboxPath(.{
@@ -107,7 +107,7 @@ test "Swarm sendMessage delivers through mailbox" {
     // Verify file was created.
     const file_path = try std.fmt.allocPrint(allocator, "{s}/alice.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "hello from swarm") != null);
@@ -118,7 +118,7 @@ test "Swarm detectBackend returns a valid backend" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var s = try Swarm.initWithMailboxPath(.{
@@ -136,7 +136,7 @@ test "Swarm shutdown sets abort flag" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var s = try Swarm.initWithMailboxPath(.{
@@ -156,7 +156,7 @@ test "Swarm task_manager integration" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var s = try Swarm.initWithMailboxPath(.{

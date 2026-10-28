@@ -90,9 +90,9 @@ test "shouldCompact returns false below threshold" {
 
 test "shouldCompact returns true above threshold" {
     // 4 chars ≈ 1 token, so 401+ chars → 100+ tokens
-    const long_text = "x" ** 404;
+    const long_text: [404]u8 = @splat('x');
     const msgs = [_]message_mod.Message{
-        .{ .system = .{ .header = message_mod.Header.init(), .content = long_text } },
+        .{ .system = .{ .header = message_mod.Header.init(), .content = &long_text } },
     };
     try std.testing.expect(shouldCompact(&msgs, .{ .token_threshold = 100 }));
 }

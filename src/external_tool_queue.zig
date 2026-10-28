@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const json_mod = @import("json.zig");
+const uuid_mod = @import("uuid.zig");
 
 pub const ExternalToolResult = struct {
     tool_use_id: []const u8,
@@ -14,14 +15,14 @@ pub const ExternalToolResult = struct {
 };
 
 pub const ExternalToolQueue = struct {
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
     results: std.ArrayList(ExternalToolResult),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) ExternalToolQueue {
         return .{
-            .results = .{},
+            .results = .empty,
             .allocator = allocator,
         };
     }
@@ -36,8 +37,9 @@ pub const ExternalToolQueue = struct {
 
     /// Push a tool result from the JS main thread. Wakes any blocked waitFor().
     pub fn push(self: *ExternalToolQueue, tool_use_id: []const u8, result_json: []const u8, is_error: bool) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = uuid_mod.defaultIo();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         const id_dupe = try self.allocator.dupe(u8, tool_use_id);
         const json_dupe = try self.allocator.dupe(u8, result_json);
@@ -47,7 +49,7 @@ pub const ExternalToolQueue = struct {
             .result_json = json_dupe,
             .is_error = is_error,
         });
-        self.cond.signal();
+        self.cond.signal(io);
     }
 
     /// Block until a result for `tool_use_id` is available, or abort is signaled.
@@ -57,8 +59,9 @@ pub const ExternalToolQueue = struct {
         tool_use_id: []const u8,
         abort: *const std.atomic.Value(bool),
     ) ?ExternalToolResult {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = uuid_mod.defaultIo();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         while (true) {
             if (abort.load(.acquire)) return null;
@@ -70,7 +73,9 @@ pub const ExternalToolQueue = struct {
                 }
             }
 
-            self.cond.timedWait(&self.mutex, 100 * std.time.ns_per_ms) catch {};
+            self.cond.waitTimeout(io, &self.mutex, .{
+                .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake },
+            }) catch {};
         }
     }
 };

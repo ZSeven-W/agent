@@ -5,6 +5,7 @@
 //! Matches Claude Code's teammateMailbox.ts.
 
 const std = @import("std");
+const uuid_mod = @import("../uuid.zig");
 
 pub const TeammateMessage = struct {
     from: []const u8,
@@ -23,19 +24,20 @@ pub const Mailbox = struct {
     /// Creates the directory tree `~/.claude/teams/{team}/inboxes` if it
     /// does not already exist.
     pub fn init(allocator: std.mem.Allocator, team_name: []const u8) !Mailbox {
-        const home = std.posix.getenv("HOME") orelse "/tmp";
+        const io = uuid_mod.defaultIo();
+        const home = uuid_mod.getEnv("HOME") orelse "/tmp";
         const base = try std.fmt.allocPrint(allocator, "{s}/.claude/teams/{s}/inboxes", .{ home, team_name });
         errdefer allocator.free(base);
 
         // Ensure directory tree exists — open root and recursively create the
         // relative sub-path.  This mirrors `mkdir -p` without needing to
         // manually create each component.
-        var root = try std.fs.openDirAbsolute("/", .{});
-        defer root.close();
-        // base starts with "/" — strip the leading slash so makePath gets a
+        var root = try std.Io.Dir.openDirAbsolute(io, "/", .{});
+        defer root.close(io);
+        // base starts with "/" — strip the leading slash so createDirPath gets a
         // relative path under root.
         const rel = if (base.len > 0 and base[0] == '/') base[1..] else base;
-        root.makePath(rel) catch |e| switch (e) {
+        root.createDirPath(io, rel) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -127,12 +129,13 @@ pub const Mailbox = struct {
         defer self.allocator.free(lock);
 
         // Acquire lock (simple file-based advisory lock).
+        const io = uuid_mod.defaultIo();
         var retries: u32 = 0;
-        var lock_file: ?std.fs.File = null;
+        var lock_file: ?std.Io.File = null;
         while (retries < 10) : (retries += 1) {
-            lock_file = std.fs.createFileAbsolute(lock, .{ .exclusive = true }) catch |e| switch (e) {
+            lock_file = std.Io.Dir.createFileAbsolute(io, lock, .{ .exclusive = true }) catch |e| switch (e) {
                 error.PathAlreadyExists => {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    io.sleep(.fromMilliseconds(10), .awake) catch {};
                     continue;
                 },
                 else => return e,
@@ -140,15 +143,16 @@ pub const Mailbox = struct {
             break;
         }
         if (lock_file == null) return error.LockTimeout;
-        lock_file.?.close();
-        defer std.fs.deleteFileAbsolute(lock) catch {};
+        lock_file.?.close(io);
+        defer std.Io.Dir.deleteFileAbsolute(io, lock) catch {};
 
         // Read existing content.
-        var existing_content: []u8 = &.{};
-        if (std.fs.openFileAbsolute(path, .{})) |file| {
-            defer file.close();
-            existing_content = file.readToEndAlloc(self.allocator, 1024 * 1024) catch &.{};
-        } else |_| {}
+        const existing_content: []u8 = std.Io.Dir.cwd().readFileAlloc(
+            io,
+            path,
+            self.allocator,
+            .limited(1024 * 1024),
+        ) catch &.{};
         defer if (existing_content.len > 0) self.allocator.free(existing_content);
 
         // Escape text values for safe JSON embedding.
@@ -191,9 +195,9 @@ pub const Mailbox = struct {
         defer self.allocator.free(output);
 
         // Write back atomically.
-        const file = try std.fs.createFileAbsolute(path, .{});
-        defer file.close();
-        try file.writeAll(output);
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, output);
     }
 
     /// Poll for messages with timeout. Returns first unread message or null.
@@ -203,17 +207,18 @@ pub const Mailbox = struct {
         timeout_ms: u64,
         abort: *const std.atomic.Value(bool),
     ) !?TeammateMessage {
-        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-        while (std.time.milliTimestamp() < deadline) {
+        const io = uuid_mod.defaultIo();
+        const deadline = std.Io.Clock.real.now(io).toMilliseconds() + @as(i64, @intCast(timeout_ms));
+        while (std.Io.Clock.real.now(io).toMilliseconds() < deadline) {
             if (abort.load(.acquire)) return null;
 
             // Check for inbox file.
             const path = try self.inboxPath(agent_name);
             defer self.allocator.free(path);
 
-            if (std.fs.openFileAbsolute(path, .{})) |file| {
-                defer file.close();
-                const stat = try file.stat();
+            if (std.Io.Dir.openFileAbsolute(io, path, .{})) |file| {
+                defer file.close(io);
+                const stat = try file.stat(io);
                 if (stat.size > 2) {
                     // Has content — return a simple indication.
                     // Full JSON parsing would be done by the caller.
@@ -226,7 +231,7 @@ pub const Mailbox = struct {
                 }
             } else |_| {}
 
-            std.Thread.sleep(500 * std.time.ns_per_ms);
+            io.sleep(.fromMilliseconds(500), .awake) catch {};
         }
         return null;
     }
@@ -241,7 +246,7 @@ test "Mailbox initWithPath creates mailbox struct" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -255,7 +260,7 @@ test "Mailbox send creates inbox file with JSON array" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -270,7 +275,7 @@ test "Mailbox send creates inbox file with JSON array" {
     // Read the file back and verify it contains expected JSON.
     const file_path = try std.fmt.allocPrint(allocator, "{s}/alice.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"from\":\"bob\"") != null);
@@ -284,7 +289,7 @@ test "Mailbox send appends to existing inbox" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -303,7 +308,7 @@ test "Mailbox send appends to existing inbox" {
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/carol.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     // Should contain both messages.
@@ -319,7 +324,7 @@ test "Mailbox send escapes special characters" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -333,7 +338,7 @@ test "Mailbox send escapes special characters" {
 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/frank.json", .{path});
     defer allocator.free(file_path);
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(contents);
 
     // The newline should be escaped as \n, not literal.
@@ -347,7 +352,7 @@ test "Mailbox poll returns null on empty inbox" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -364,7 +369,7 @@ test "Mailbox poll returns null on abort" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);
@@ -380,7 +385,7 @@ test "Mailbox poll finds messages after send" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(path);
 
     var mbox = try Mailbox.initWithPath(allocator, path);

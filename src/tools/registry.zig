@@ -101,7 +101,7 @@ pub const ToolRegistry = struct {
 
     /// Return all tool names (caller owns the returned slice).
     pub fn listNames(self: *const ToolRegistry, allocator: std.mem.Allocator) ![][]const u8 {
-        var names: std.ArrayList([]const u8) = .{};
+        var names: std.ArrayList([]const u8) = .empty;
         var it = self.tools.keyIterator();
         while (it.next()) |key| {
             try names.append(allocator, key.*);

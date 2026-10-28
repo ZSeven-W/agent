@@ -16,7 +16,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.17.0
 
       - name: Run tests
         run: zig build test
@@ -56,7 +56,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.17.0
 
       - name: Build NAPI addon
         run: zig build napi -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}

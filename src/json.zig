@@ -106,28 +106,28 @@ pub const JsonSchema = struct {
     /// All allocations go through `allocator`; the result is only valid while
     /// the arena backing those allocations is alive.
     pub fn toJsonValue(self: JsonSchema, allocator: std.mem.Allocator) !JsonValue {
-        var map = std.json.ObjectMap.init(allocator);
-        errdefer map.deinit();
+        var map: std.json.ObjectMap = .empty;
+        errdefer map.deinit(allocator);
 
         // "type"
-        try map.put("type", JsonValue{ .string = self.type });
+        try map.put(allocator, "type", JsonValue{ .string = self.type });
 
         // "description"
         if (self.description) |desc| {
-            try map.put("description", JsonValue{ .string = desc });
+            try map.put(allocator, "description", JsonValue{ .string = desc });
         }
 
         // "properties"
         if (self.properties) |props| {
-            var props_map = std.json.ObjectMap.init(allocator);
-            errdefer props_map.deinit();
+            var props_map: std.json.ObjectMap = .empty;
+            errdefer props_map.deinit(allocator);
 
             for (props) |prop| {
                 const prop_value = try prop.schema.toJsonValue(allocator);
-                try props_map.put(prop.name, prop_value);
+                try props_map.put(allocator, prop.name, prop_value);
             }
 
-            try map.put("properties", JsonValue{ .object = props_map });
+            try map.put(allocator, "properties", JsonValue{ .object = props_map });
         }
 
         // "required"
@@ -139,7 +139,7 @@ pub const JsonSchema = struct {
                 try arr.append(JsonValue{ .string = name });
             }
 
-            try map.put("required", JsonValue{ .array = arr });
+            try map.put(allocator, "required", JsonValue{ .array = arr });
         }
 
         return JsonValue{ .object = map };
@@ -185,7 +185,7 @@ test "JsonSchema toJsonValue" {
             .{ .name = "path", .schema = .{ .type = "string", .description = "File path" } },
             .{ .name = "count", .schema = .{ .type = "integer" } },
         },
-        .required = &[_][]const u8{ "path" },
+        .required = &[_][]const u8{"path"},
     };
 
     var arena = std.heap.ArenaAllocator.init(allocator);

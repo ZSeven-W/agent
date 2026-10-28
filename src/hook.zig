@@ -1,6 +1,7 @@
 // src/hook.zig
 const std = @import("std");
 const json = @import("json.zig");
+const uuid_mod = @import("uuid.zig");
 
 pub const JsonValue = json.JsonValue;
 
@@ -116,27 +117,29 @@ pub const HookRunner = struct {
         input_json: []const u8,
         cwd: ?[]const u8,
     ) !HookOutput {
-        var child = std.process.Child.init(
-            &.{ "/bin/sh", "-c", command },
-            self.allocator,
-        );
-        child.stdin_behavior = .pipe;
-        child.stdout_behavior = .pipe;
-        child.stderr_behavior = .pipe;
-        if (cwd) |c| child.cwd = c;
-
-        try child.spawn();
+        const io = uuid_mod.defaultIo();
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ "/bin/sh", "-c", command },
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .cwd = if (cwd) |c| .{ .path = c } else .inherit,
+        });
 
         // Write input to stdin
         if (child.stdin) |stdin| {
-            stdin.writeAll(input_json) catch {};
-            stdin.close();
+            stdin.writeStreamingAll(io, input_json) catch {};
+            stdin.close(io);
             child.stdin = null;
         }
 
-        const stdout = try child.stdout.?.readToEndAlloc(self.allocator, 1024 * 1024);
-        const stderr = try child.stderr.?.readToEndAlloc(self.allocator, 1024 * 1024);
-        const term = try child.wait();
+        var stdout_reader = child.stdout.?.reader(io, &.{});
+        const stdout = try stdout_reader.interface.allocRemaining(self.allocator, .limited(1024 * 1024));
+        errdefer self.allocator.free(stdout);
+        var stderr_reader = child.stderr.?.reader(io, &.{});
+        const stderr = try stderr_reader.interface.allocRemaining(self.allocator, .limited(1024 * 1024));
+        errdefer self.allocator.free(stderr);
+        const term = try child.wait(io);
 
         return .{
             .exit_code = switch (term) {
@@ -167,6 +170,6 @@ test "HookRunner init/deinit" {
 
 test "HookEventType has all 24 variants" {
     // Ensure enum is complete
-    const count = @typeInfo(HookEventType).@"enum".fields.len;
+    const count = @typeInfo(HookEventType).@"enum".field_names.len;
     try std.testing.expectEqual(@as(usize, 24), count);
 }

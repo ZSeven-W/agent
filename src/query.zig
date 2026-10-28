@@ -95,32 +95,32 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
     for (blocks) |block| {
         switch (block) {
             .text => |t| {
-                var obj = std.json.ObjectMap.init(allocator);
-                try obj.put("type", .{ .string = "text" });
-                try obj.put("text", .{ .string = t });
+                var obj: std.json.ObjectMap = .empty;
+                try obj.put(allocator, "type", .{ .string = "text" });
+                try obj.put(allocator, "text", .{ .string = t });
                 try arr.append(.{ .object = obj });
             },
             .thinking => |tb| {
                 // Echo thinking blocks back to preserve the reasoning chain.
                 // MiniMax docs confirm: "将完整的 response.content（包含
                 // thinking/text/tool_use 等所有块）添加到消息历史"
-                var obj = std.json.ObjectMap.init(allocator);
-                try obj.put("type", .{ .string = "thinking" });
-                try obj.put("thinking", .{ .string = tb.thinking });
+                var obj: std.json.ObjectMap = .empty;
+                try obj.put(allocator, "type", .{ .string = "thinking" });
+                try obj.put(allocator, "thinking", .{ .string = tb.thinking });
                 try arr.append(.{ .object = obj });
             },
             .tool_use => |tu| {
-                var obj = std.json.ObjectMap.init(allocator);
-                try obj.put("type", .{ .string = "tool_use" });
-                try obj.put("id", .{ .string = tu.id });
-                try obj.put("name", .{ .string = tu.name });
-                try obj.put("input", tu.input);
+                var obj: std.json.ObjectMap = .empty;
+                try obj.put(allocator, "type", .{ .string = "tool_use" });
+                try obj.put(allocator, "id", .{ .string = tu.id });
+                try obj.put(allocator, "name", .{ .string = tu.name });
+                try obj.put(allocator, "input", tu.input);
                 try arr.append(.{ .object = obj });
             },
             .tool_result => |tr| {
-                var obj = std.json.ObjectMap.init(allocator);
-                try obj.put("type", .{ .string = "tool_result" });
-                try obj.put("tool_use_id", .{ .string = tr.tool_use_id });
+                var obj: std.json.ObjectMap = .empty;
+                try obj.put(allocator, "type", .{ .string = "tool_result" });
+                try obj.put(allocator, "tool_use_id", .{ .string = tr.tool_use_id });
                 // Anthropic API requires content to be a string, not a JSON object
                 const raw_val: json_mod.JsonValue = switch (tr.content) {
                     .string => tr.content,
@@ -135,8 +135,8 @@ fn contentBlocksToJson(allocator: std.mem.Allocator, blocks: []const message_mod
                     ) catch raw_val.string;
                     break :blk .{ .string = truncated };
                 } else raw_val;
-                try obj.put("content", content_val);
-                if (tr.is_error) try obj.put("is_error", .{ .bool = true });
+                try obj.put(allocator, "content", content_val);
+                if (tr.is_error) try obj.put(allocator, "is_error", .{ .bool = true });
                 try arr.append(.{ .object = obj });
             },
             .image => {},
@@ -159,11 +159,11 @@ pub const QueryLoopIterator = struct {
     stream_iter: ?providers_types.StreamIterator = null,
     tool_exec: ?tool_executor_mod.StreamingToolExecutor = null,
     // Accumulates partial_json fragments for the current tool_use input
-    tool_json_buf: std.ArrayListUnmanaged(u8) = .{},
+    tool_json_buf: std.ArrayList(u8) = .empty,
     // Accumulates text_delta fragments for the assistant message
-    text_buf: std.ArrayListUnmanaged(u8) = .{},
+    text_buf: std.ArrayList(u8) = .empty,
     // Accumulates thinking_delta fragments for the assistant message
-    thinking_buf: std.ArrayListUnmanaged(u8) = .{},
+    thinking_buf: std.ArrayList(u8) = .empty,
 
     const Phase = enum {
         start,
@@ -326,7 +326,7 @@ pub const QueryLoopIterator = struct {
                 defer turn_arena.deinit();
                 const turn_alloc = turn_arena.allocator();
 
-                var api_messages: std.ArrayList(providers_types.ApiMessage) = .{};
+                var api_messages: std.ArrayList(providers_types.ApiMessage) = .empty;
 
                 const messages_slice = self.state.messages.items();
                 for (messages_slice) |msg| {
@@ -410,7 +410,7 @@ pub const QueryLoopIterator = struct {
                 if (self.stream_iter) |*iter| {
                     if (iter.next()) |delta| {
                         // Track tool_use blocks
-                        if (delta.@"type" == .content_block_start and delta.tool_name != null) {
+                        if (delta.type == .content_block_start and delta.tool_name != null) {
                             if (self.tool_exec == null) {
                                 self.tool_exec = tool_executor_mod.StreamingToolExecutor.init(self.params.allocator);
                             }
@@ -429,28 +429,28 @@ pub const QueryLoopIterator = struct {
                         }
 
                         // Accumulate thinking for assistant message history
-                        if (delta.@"type" == .thinking_delta) {
+                        if (delta.type == .thinking_delta) {
                             if (delta.text) |t| {
                                 self.thinking_buf.appendSlice(self.params.allocator, t) catch {};
                             }
                         }
 
                         // Accumulate text for assistant message history
-                        if (delta.@"type" == .text_delta) {
+                        if (delta.type == .text_delta) {
                             if (delta.text) |t| {
                                 self.text_buf.appendSlice(self.params.allocator, t) catch {};
                             }
                         }
 
                         // Accumulate tool input JSON fragments
-                        if (delta.@"type" == .tool_use_delta) {
+                        if (delta.type == .tool_use_delta) {
                             if (delta.partial_json) |pj| {
                                 self.tool_json_buf.appendSlice(self.params.allocator, pj) catch {};
                             }
                         }
 
                         // When a tool_use content block ends, parse accumulated JSON into the tool's input
-                        if (delta.@"type" == .content_block_stop and self.tool_exec != null and self.tool_json_buf.items.len > 0) {
+                        if (delta.type == .content_block_stop and self.tool_exec != null and self.tool_json_buf.items.len > 0) {
                             const parsed_input = json_mod.parse(self.params.allocator, self.tool_json_buf.items) catch null;
                             if (parsed_input) |p| {
                                 // Update the last added tool's input
@@ -462,7 +462,7 @@ pub const QueryLoopIterator = struct {
                             self.tool_json_buf.clearRetainingCapacity();
                         }
 
-                        if (delta.@"type" == .message_stop) {
+                        if (delta.type == .message_stop) {
                             self.flushPendingToolInput();
                             self.storeAssistantMessage();
                             if (self.tool_exec != null and self.tool_exec.?.pendingCount() > 0) {
@@ -755,6 +755,7 @@ fn microcompactMessages(
             .{pos.chars},
         ) catch "[cleared]";
         messages[pos.msg_idx].content.array.items[pos.block_idx].object.put(
+            allocator,
             "content",
             json_mod.JsonValue{ .string = placeholder },
         ) catch {};
@@ -878,10 +879,10 @@ test "queryLoop streams text with MockProvider" {
     const testing_mod = @import("testing.zig");
 
     const deltas = [_]streaming_events.StreamDelta{
-        .{ .@"type" = .message_start },
-        .{ .@"type" = .text_delta, .text = "Hello" },
-        .{ .@"type" = .text_delta, .text = " World" },
-        .{ .@"type" = .message_stop },
+        .{ .type = .message_start },
+        .{ .type = .text_delta, .text = "Hello" },
+        .{ .type = .text_delta, .text = " World" },
+        .{ .type = .message_stop },
     };
     var mock = testing_mod.MockProvider.init(allocator, &.{.{ .deltas = &deltas }});
     var provider_iface = mock.provider();
@@ -957,16 +958,16 @@ test "queryLoop dispatches tool calls with MockProvider" {
 
     // Simulate: model calls FakeTool, then produces a final text response
     const turn1_deltas = [_]streaming_events.StreamDelta{
-        .{ .@"type" = .message_start },
-        .{ .@"type" = .content_block_start, .tool_use_id = "t1", .tool_name = "FakeTool" },
-        .{ .@"type" = .tool_use_delta, .partial_json = "{}" },
-        .{ .@"type" = .content_block_stop },
-        .{ .@"type" = .message_stop },
+        .{ .type = .message_start },
+        .{ .type = .content_block_start, .tool_use_id = "t1", .tool_name = "FakeTool" },
+        .{ .type = .tool_use_delta, .partial_json = "{}" },
+        .{ .type = .content_block_stop },
+        .{ .type = .message_stop },
     };
     const turn2_deltas = [_]streaming_events.StreamDelta{
-        .{ .@"type" = .message_start },
-        .{ .@"type" = .text_delta, .text = "Done!" },
-        .{ .@"type" = .message_stop },
+        .{ .type = .message_start },
+        .{ .type = .text_delta, .text = "Done!" },
+        .{ .type = .message_stop },
     };
     var mock = testing_mod.MockProvider.init(allocator, &.{
         .{ .deltas = &turn1_deltas },

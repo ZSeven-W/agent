@@ -51,10 +51,10 @@ pub const Team = struct {
 
     pub fn init(config: TeamConfig) !Team {
         var members = std.StringHashMap(query_engine_mod.QueryEngine).init(config.allocator);
-        var perm_ctxs = std.ArrayList(*perm.PermissionContext){};
-        var hook_runners = std.ArrayList(*hook_mod.HookRunner){};
-        var sliding_windows = std.ArrayList(*context_mod.SlidingWindowStrategy){};
-        var strategies = std.ArrayList(*context_mod.ContextStrategy){};
+        var perm_ctxs: std.ArrayList(*perm.PermissionContext) = .empty;
+        var hook_runners: std.ArrayList(*hook_mod.HookRunner) = .empty;
+        var sliding_windows: std.ArrayList(*context_mod.SlidingWindowStrategy) = .empty;
+        var strategies: std.ArrayList(*context_mod.ContextStrategy) = .empty;
 
         errdefer {
             for (hook_runners.items) |h| h.deinit();
